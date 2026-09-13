@@ -8,7 +8,7 @@ vi.mock("@/lib/supabase", () => ({
     from: vi.fn().mockReturnThis(),
     select: vi.fn().mockReturnThis(),
     eq: vi.fn().mockReturnThis(),
-    order: vi.fn().mockResolvedValue({ data: [], error: null }),
+    order: vi.fn().mockReturnThis(),
     range: vi.fn().mockResolvedValue({ data: [], error: null }),
   }),
 }));
@@ -28,6 +28,7 @@ describe("Universal Folder Area Decks & Source Isolation", () => {
         {
           id: "web-1",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "wizard",
@@ -36,6 +37,7 @@ describe("Universal Folder Area Decks & Source Isolation", () => {
         {
           id: "web-2",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "wizard",
@@ -44,6 +46,7 @@ describe("Universal Folder Area Decks & Source Isolation", () => {
         {
           id: "web-3",
           primaryLocality: "Adyar",
+          pincode: null,
           area: "Adyar",
           year: "2026",
           source: "wizard",
@@ -54,6 +57,7 @@ describe("Universal Folder Area Decks & Source Isolation", () => {
         {
           id: "hot-1",
           primaryLocality: "Anna Nagar",
+          pincode: null,
           area: "Anna Nagar",
           year: "2026",
           source: "admin",
@@ -63,6 +67,7 @@ describe("Universal Folder Area Decks & Source Isolation", () => {
         {
           id: "hot-2",
           primaryLocality: "Anna Nagar",
+          pincode: null,
           area: "Anna Nagar",
           year: "2026",
           source: "manual",
@@ -74,6 +79,7 @@ describe("Universal Folder Area Decks & Source Isolation", () => {
         {
           id: "upload-2026-1",
           primaryLocality: "Madipakkam",
+          pincode: null,
           area: "Madipakkam",
           year: "2026",
           source: "upload",
@@ -83,6 +89,7 @@ describe("Universal Folder Area Decks & Source Isolation", () => {
         {
           id: "upload-2026-2",
           primaryLocality: "Madipakkam",
+          pincode: null,
           area: "Madipakkam",
           year: "2026",
           source: "upload",
@@ -94,6 +101,7 @@ describe("Universal Folder Area Decks & Source Isolation", () => {
         {
           id: "upload-2025-1",
           primaryLocality: "Tambaram",
+          pincode: null,
           area: "Tambaram",
           year: "2025",
           source: "upload",

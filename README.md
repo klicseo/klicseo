@@ -59,7 +59,7 @@ src/
 ├── lib/                     Server-side libs + client-safe -shared modules
 └── ...
 supabase/
-├── migrations/              Numbered SQL migrations 0001 … 0025
+├── migrations/              Numbered SQL migrations 0001 … 0042
 ├── email-templates/         Branded HTML for invite/recovery emails
 └── ADMIN_AUTH_SETUP.md      Notes for setting up Supabase Auth + SMTP
 public/                      Static assets
@@ -224,6 +224,59 @@ writes route through the service-role key, never from the browser.**
 See `SECURITY.md` § 7 for the full auth/authz description.
 
 ---
+
+### Assignment scope and lead folders
+
+Apply `supabase/migrations/0043_separate_custom_folder_membership.sql` in the
+Supabase SQL Editor before running this application version. The migration
+preserves folder contents and moves existing owned-folder assignments into
+separate staff lists. Legacy schedules targeting unowned custom folders pause
+for destination review. The application service key cannot apply SQL migrations.
+`supabase/tests/custom_folder_membership.sql` is a destructive-schema fixture for
+an **empty disposable local database only**, never the live Supabase database.
+
+
+The Custom Folders directory shows only folders created through **New Folder**.
+Only super admins can delete folders or lists. Custom folder cards have a
+**Delete folder** button with confirmation; deletion keeps the customer leads
+in All Leads and preserves their staff assignments. Deleting an assignment list
+unassigns its leads but preserves their custom folder membership.
+Allocation and recycle lists remain in Lead Lists / My Leads. Folder identities
+are persisted as `lead_custom_folder:<list-id>` keys in `app_settings`, separate
+from list names and owners. Legacy folder-creation audit records are recovered
+and persisted on first directory load so audit retention cannot remove cards.
+
+Only `super_admin` has global lead and employee visibility. Regular `admin`
+accounts have all six permissions but read and edit their assigned records;
+`staff` additionally require explicitly granted permissions. Global allocation,
+recycling, schedules, and employee reassignment are super-admin operations.
+
+After migration `0043`, a lead can belong to one custom folder (`lead_folder_items`)
+and one staff assignment list (`lead_list_items`, exclusive constraint from `0042`).
+Normal allocation includes all unassigned statuses by default and preserves each
+lead’s current status. An explicit status selection narrows both the preview and
+the allocated batch; existing schedules retain their saved filters.
+Allocating or recycling a lead preserves its custom folder. Staff visibility comes
+only from the assignment list's `assigned_admin_user_id`. Folder moves use one atomic upsert;
+scoped users can move only their own leads between their own folders. New folders
+created by scoped users are automatically assigned to them. Employee records and
+login accounts are separate entities.
+
+Search matches names, formatted or partial phones, car numbers, model, area, and
+address. Encrypted fields are decrypted server-side within the caller's filtered
+scope before matching. The root directory has separate lead search and folder
+filter inputs; staff can search their assignments on My Leads or within a list.
+
+Payments use the same lead scope for page, save, and export; edits require
+`payments.manage`. Daily report calls represent logged disposition changes, not
+verified telephone calls. Unanswered and custom pending statuses remain pending
+consistently across reports, list progress, and queue replenishment.
+
+Scheduled jobs use `GET /api/cron/lead-allocations` with a required
+`Authorization: Bearer <CRON_SECRET>` header. Configure a scheduler to call it;
+the repository does not install an external cron schedule. Automated list creation
+does not require a browser session. Migration `0042` must be applied for atomic
+folder moves.
 
 ## 8. Application-layer encryption
 
@@ -537,9 +590,9 @@ npm run lint       # ESLint
 npx tsc --noEmit   # Type check only
 ```
 
-There's no test suite yet. Most validation today is type-checking + manual
-QA. If you add tests, drop them in `__tests__/` and add an `npm test`
-script.
+Run `npm test -- --run` for the Vitest unit and component suite. It includes
+admin/staff scope, encrypted-field search, folder moves, imports, reports, and
+allocation regressions. Run `npx tsc --noEmit` and `npm run build` before release.
 
 ---
 

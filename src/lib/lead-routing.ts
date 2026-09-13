@@ -1,7 +1,14 @@
+import { matchesAllocationStatus } from "./lead-routing-shared";
+import { allocationFolderLeadIds } from "./lead-folder-items";
 import "server-only";
+import { listAssignableAdminUsers } from "./admin-users";
+import { validateAllocationRequest } from "./allocation-validation";
+import { invalidateLeadListCache } from "./leadLists";
+import { readAllRows } from "./db-pagination";
+import { isCompletedLeadStatus } from "./leads-shared";
 import { supabase } from "./supabase";
 import { unseal } from "./crypto";
-import { addLeadsToList, insertLeadList } from "./leadLists";
+import { addLeadsToList, insertLeadList, claimUnassignedLeads, getLeadList } from "./leadLists";
 import { resolveLeadIdsForArea, resolvePrimaryLocality, getOrBuildLocationIndex, invalidateAreaCountsCache, CANONICAL_AREA_ALIASES } from "./area";
 import { isWebsiteFormLead, isHotLead, isYearLead } from "./leads-shared";
 import {
@@ -44,12 +51,8 @@ export function matchesFilter(
 ): boolean {
   if (!filter) return true;
 
-  // 1. Status Filter (defaults to new & draft leads)
-  const allowedStatuses = filter.statuses && filter.statuses.length > 0 ? filter.statuses : ["new", "draft"];
-  const leadStatus = (lead.status ?? "new").toLowerCase().trim();
-  if (!allowedStatuses.some((s) => s.toLowerCase().trim() === leadStatus)) {
-    return false;
-  }
+  // Status is an optional filter, independent of current assignment.
+  if (!matchesAllocationStatus(lead.status, filter.statuses)) return false;
 
   // 1.5 Folder / Year / Source Filter
   if (filter.folder) {
@@ -111,7 +114,7 @@ export function matchesFilter(
 
 
 /**
- * Count matching unallocated leads available in the pool (excluding already-assigned leads and booked leads).
+ * Count unassigned leads, optionally narrowed by status and other filters.
  * Evaluates in memory using the fast location index for near-instant (under 10ms) responses.
  */
 export async function countMatchingLeads(
@@ -128,17 +131,13 @@ export async function countMatchingLeads(
       (filter.min_price != null && filter.min_price > 0),
     );
 
-    const [locationIndex, assignedSet] = await Promise.all([
+    const [locationIndex, assignedSet, customFolderIds] = await Promise.all([
       getOrBuildLocationIndex(),
-      getAllAssignedLeadIds(),
+      getAllAssignedLeadIds({ fresh: true }),
+      allocationFolderLeadIds(filter.folder),
     ]);
 
-    const allowedStatuses = filter.statuses && filter.statuses.length > 0 ? filter.statuses : ["new", "draft"];
-    const statusFilteredLeads = locationIndex.allLeads.filter((l) => {
-      if (l.status === "booked") return false;
-      const s = (l.status ?? "new").toLowerCase().trim();
-      return allowedStatuses.some((allowed) => allowed.toLowerCase().trim() === s);
-    });
+    const statusFilteredLeads = locationIndex.allLeads.filter((lead) => matchesAllocationStatus(lead.status, filter.statuses));
 
     // If a folder/year filter is specified, totalUnallocated is scoped to that folder/year
     const folderFilteredLeads = statusFilteredLeads.filter((lead) => {
@@ -152,20 +151,23 @@ export async function countMatchingLeads(
           if (!isWebsiteFormLead(lead)) return false;
         } else if (filter.folder === "hot_leads") {
           if (!isHotLead(lead)) return false;
+        } else {
+          if (!customFolderIds?.has(lead.id)) return false;
         }
-      } else if (filter.year && filter.year !== "all") {
-        if (!isYearLead(lead, filter.year)) return false;
       }
+      const targetYear = filter.folder?.startsWith("year_") ? filter.folder.slice(5) : filter.year;
+      if (targetYear && targetYear !== "all" && !isYearLead(lead, targetYear)) return false;
       return true;
     });
 
-    const totalUnallocated = folderFilteredLeads.filter((l) => !assignedSet.has(l.id)).length;
+    const sourceFilteredLeads = folderFilteredLeads.filter((lead) => !filter.source || filter.source === "all" || lead.source === filter.source);
+    const totalUnallocated = sourceFilteredLeads.filter((l) => !assignedSet.has(l.id)).length;
 
     if (!hasExplicitFilters) {
       return { count: totalUnallocated, totalUnallocated };
     }
 
-    const availableMatching = folderFilteredLeads.filter((lead) => {
+    const availableMatching = sourceFilteredLeads.filter((lead) => {
       if (assignedSet.has(lead.id)) return false;
 
       // 1. Area filter (Location-scoped matching)
@@ -207,7 +209,7 @@ export async function countMatchingLeads(
     return { count: availableMatching, totalUnallocated };
   } catch (err) {
     console.error("countMatchingLeads error:", err);
-    return { count: 0, totalUnallocated: 0 };
+    throw err;
   }
 }
 
@@ -251,6 +253,23 @@ export async function listScheduledAllocations(): Promise<LeadAllocationSchedule
   }
 }
 
+async function assertAllocationDestination(assigneeIds: string[], targetListId?: string | null): Promise<{ assigned_admin_user_id: string | null } | null> {
+  const users = await listAssignableAdminUsers();
+  const activeIds = new Set(users.map((user) => user.id));
+  if (targetListId) {
+    const { data: target, error } = await supabase().from("lead_lists")
+      .select("id, assigned_admin_user_id, is_custom_folder").eq("id", targetListId).maybeSingle();
+    if (error) throw error;
+    if (!target) throw new Error("Destination list no longer exists.");
+    if (target.is_custom_folder) throw new Error("Choose a staff assignment list as the destination; custom folders are source folders.");
+    if (target.assigned_admin_user_id && !activeIds.has(target.assigned_admin_user_id)) throw new Error("The destination list belongs to an inactive team member.");
+    return target;
+  } else if (assigneeIds.some((id) => !activeIds.has(id))) {
+    throw new Error("Choose active team members for allocation.");
+  }
+  return null;
+}
+
 /**
  * Execute immediate allocation of N leads matching conditions, guaranteeing no duplicate assignments.
  */
@@ -264,39 +283,29 @@ export async function executeLeadAllocation(req: {
 }): Promise<{
   allocatedCount: number;
   leadIds: string[];
+  warnings?: string[];
 }> {
+  if (!Number.isSafeInteger(req.lead_count) || req.lead_count <= 0) {
+    throw new Error("Lead count must be a positive whole number.");
+  }
+  const assignees = [...new Set(req.assignee_ids ?? [])];
+  if (!req.target_list_id && !assignees.length) {
+    throw new Error("Select a destination list or at least one staff member.");
+  }
+  const destination = await assertAllocationDestination(assignees, req.target_list_id);
   // 1. Fetch location index and assigned lead IDs
-  const [locationIndex, globalAssignedSet] = await Promise.all([
+  const [locationIndex, globalAssignedSet, customFolderIds] = await Promise.all([
     getOrBuildLocationIndex(),
-    getAllAssignedLeadIds(),
+    getAllAssignedLeadIds({ fresh: true }),
+    allocationFolderLeadIds(req.conditions.folder),
   ]);
 
-  let assignedSet = globalAssignedSet;
-  if (req.target_list_id) {
-    // If adding to a specific list, exclude leads already in this list
-    const { data: existingInList } = await supabase()
-      .from("lead_list_items")
-      .select("lead_id")
-      .eq("list_id", req.target_list_id)
-      .range(0, 49999);
-    assignedSet = new Set((existingInList ?? []).map((i) => i.lead_id));
-  }
+  const assignedSet = globalAssignedSet;
 
-  // 2. Select matching candidate leads directly from index
-  const allowedStatuses =
-    req.conditions.statuses && req.conditions.statuses.length > 0
-      ? req.conditions.statuses
-      : ["new", "draft"];
-
+  // 2. Select unassigned candidates; do not reset or implicitly restrict status.
   const candidateLeads = locationIndex.allLeads.filter((lead) => {
-    if (lead.status === "booked") return false;
     if (assignedSet.has(lead.id)) return false;
-
-    // 0. Status filter
-    const leadStatus = (lead.status ?? "new").toLowerCase().trim();
-    if (!allowedStatuses.some((s) => s.toLowerCase().trim() === leadStatus)) {
-      return false;
-    }
+    if (!matchesAllocationStatus(lead.status, req.conditions.statuses)) return false;
 
     // 0.5 Folder / Year / Source filter
     if (req.conditions.folder && req.conditions.folder !== "all") {
@@ -309,10 +318,14 @@ export async function executeLeadAllocation(req: {
         if (!isWebsiteFormLead(lead)) return false;
       } else if (req.conditions.folder === "hot_leads") {
         if (!isHotLead(lead)) return false;
+      } else {
+        if (!customFolderIds?.has(lead.id)) return false;
       }
-    } else if (req.conditions.year && req.conditions.year !== "all") {
-      if (!isYearLead(lead, req.conditions.year)) return false;
     }
+    const targetYear = req.conditions.folder?.startsWith("year_") ? req.conditions.folder.slice(5) : req.conditions.year;
+    if (targetYear && targetYear !== "all" && !isYearLead(lead, targetYear)) return false;
+
+    if (req.conditions.source && req.conditions.source !== "all" && lead.source !== req.conditions.source) return false;
 
     // 1. Area filter (Location-scoped matching)
     if (req.conditions.areas && req.conditions.areas.length > 0) {
@@ -356,44 +369,68 @@ export async function executeLeadAllocation(req: {
     return { allocatedCount: 0, leadIds: [] };
   }
 
-  const assignees = req.assignee_ids ?? [];
+  const allocatedLeadIds: string[] = [];
+  const warnings: string[] = [];
+  async function recordHistory(listId: string, staffId: string | null, ids: string[]): Promise<void> {
+    if (!ids.length) return;
+    const { error } = await supabase().from("lead_allocations_log").insert(ids.map((leadId) => ({
+      lead_id: leadId,
+      assigned_to_admin_user_id: staffId,
+      assigned_to_list_id: listId,
+      allocation_type: req.allocation_type ?? "manual",
+      reason: req.notes || `Allocated in batch of ${ids.length} leads`,
+    })));
+    if (error) {
+      console.error("Allocation history could not be recorded", error);
+      if (!warnings.length) warnings.push("Leads were assigned, but allocation history could not be saved. Do not repeat the allocation.");
+    }
+  }
+  let candidateOffset = 0;
+  async function claimForList(listId: string, desired: number): Promise<string[]> {
+    const claimed: string[] = [];
+    while (claimed.length < desired && candidateOffset < candidateLeads.length) {
+      const batchSize = Math.min(250, desired - claimed.length);
+      const batch = candidateLeads.slice(candidateOffset, candidateOffset + batchSize).map((lead) => lead.id);
+      candidateOffset += batch.length;
+      claimed.push(...await claimUnassignedLeads(listId, batch));
+    }
+    return claimed;
+  }
 
   if (req.target_list_id) {
-    await addLeadsToList(req.target_list_id, selectedLeadIds);
+    allocatedLeadIds.push(...await claimForList(req.target_list_id, selectedLeadIds.length));
+    await recordHistory(req.target_list_id, destination?.assigned_admin_user_id ?? null, allocatedLeadIds);
   } else if (assignees.length > 0) {
-    const leadsPerStaff = Math.ceil(selectedLeadIds.length / assignees.length);
+    const leadsPerStaff = Math.floor(selectedLeadIds.length / assignees.length);
+    const remainder = selectedLeadIds.length % assignees.length;
 
     for (let i = 0; i < assignees.length; i++) {
       const staffId = assignees[i];
-      const slice = selectedLeadIds.slice(i * leadsPerStaff, (i + 1) * leadsPerStaff);
+      const start = i * leadsPerStaff + Math.min(i, remainder);
+      const slice = selectedLeadIds.slice(start, start + leadsPerStaff + (i < remainder ? 1 : 0));
       if (slice.length === 0) continue;
 
       const listName = `Allocated Leads (${new Date().toLocaleDateString("en-IN")})`;
       const list = await insertLeadList({
         name: listName,
+        created_by: req.allocation_type && req.allocation_type !== "manual" ? null : undefined,
         assigned_admin_user_id: staffId,
       });
 
-      await addLeadsToList(list.id, slice);
+      const claimed = await claimForList(list.id, slice.length);
+      allocatedLeadIds.push(...claimed);
 
-      const logRows = slice.map((leadId) => ({
-        lead_id: leadId,
-        assigned_to_admin_user_id: staffId,
-        assigned_to_list_id: list.id,
-        allocation_type: req.allocation_type ?? "manual",
-        reason: req.notes || `Allocated in batch of ${selectedLeadIds.length} leads`,
-      }));
-
-      await supabase().from("lead_allocations_log").insert(logRows);
+      await recordHistory(list.id, staffId, claimed);
     }
   }
 
   // Incrementally update assigned leads cache (0ms) so subsequent modal queries never experience cold cache reloads
-  markLeadsAsAssigned(selectedLeadIds);
+  markLeadsAsAssigned(allocatedLeadIds);
 
   return {
-    allocatedCount: selectedLeadIds.length,
-    leadIds: selectedLeadIds,
+    allocatedCount: allocatedLeadIds.length,
+    leadIds: allocatedLeadIds,
+    ...(warnings.length ? { warnings } : {}),
   };
 }
 
@@ -404,7 +441,11 @@ export async function createAllocationSchedule(req: NewLeadAllocationRequest): P
   id?: string;
   allocatedCount?: number;
   mode: string;
+  warnings?: string[];
 }> {
+  validateAllocationRequest(req);
+  req = { ...req, assignee_ids: [...new Set(req.assignee_ids ?? [])] };
+  await assertAllocationDestination(req.assignee_ids, req.target_list_id);
   // 1. One-Time Immediate
   if (req.schedule_mode === "once_now") {
     const res = await executeLeadAllocation({
@@ -416,7 +457,7 @@ export async function createAllocationSchedule(req: NewLeadAllocationRequest): P
       allocation_type: "manual",
     });
 
-    await supabase().from("lead_allocation_schedules").insert({
+    const { error: historyError } = await supabase().from("lead_allocation_schedules").insert({
       scheduled_for: new Date().toISOString(),
       status: "completed",
       schedule_mode: "once_now",
@@ -428,7 +469,9 @@ export async function createAllocationSchedule(req: NewLeadAllocationRequest): P
       notes: req.notes ?? null,
     });
 
-    return { allocatedCount: res.allocatedCount, mode: "once_now" };
+    const warnings = [...(res.warnings ?? [])];
+    if (historyError) warnings.push("Leads were assigned, but the dispatch record could not be saved. Do not repeat the allocation.");
+    return { allocatedCount: res.allocatedCount, mode: "once_now", ...(warnings.length ? { warnings } : {}) };
   }
 
   // 2. Daily Recurring Schedule
@@ -456,39 +499,54 @@ export async function createAllocationSchedule(req: NewLeadAllocationRequest): P
 
   // 3. Queue Auto-Replenish on Completion
   if (req.schedule_mode === "queue_replenish") {
-    // Immediately assign the first batch of leads right now so staff starts with leads
-    const initialAllocation = await executeLeadAllocation({
-      lead_count: req.lead_count,
-      conditions: req.conditions,
-      assignee_ids: req.assignee_ids,
-      target_list_id: req.target_list_id,
-      notes: req.notes || "Initial Auto-Refill batch allocation",
-      allocation_type: "queue_replenish",
-    });
-
+    // Persist a paused rule before assigning anything. A failed insert must not
+    // leave an untracked initial batch, and a worker must not race this request.
+    const claimedAt = new Date().toISOString();
     const { data, error } = await supabase()
       .from("lead_allocation_schedules")
       .insert({
-        scheduled_for: new Date().toISOString(),
-        status: "active_recurring",
+        scheduled_for: claimedAt,
+        status: "paused",
         schedule_mode: "queue_replenish",
         lead_count: req.lead_count,
         replenish_threshold: req.replenish_threshold ?? 5,
         conditions: req.conditions,
         assignee_ids: req.assignee_ids,
         target_list_id: req.target_list_id ?? null,
-        allocated_lead_ids: initialAllocation.leadIds,
-        last_run_at: new Date().toISOString(),
+        allocated_lead_ids: [],
+        last_run_at: claimedAt,
         notes: req.notes ?? null,
       })
       .select("id")
       .single();
-
     if (error) throw error;
+    const rule = { id: data.id, status: "paused", last_run_at: claimedAt, notes: req.notes };
+    let initialAllocation: Awaited<ReturnType<typeof executeLeadAllocation>>;
+    try {
+      initialAllocation = await executeLeadAllocation({
+        lead_count: req.lead_count,
+        conditions: req.conditions,
+        assignee_ids: req.assignee_ids,
+        target_list_id: req.target_list_id,
+        notes: req.notes || "Initial Auto-Refill batch allocation",
+        allocation_type: "queue_replenish",
+      });
+    } catch (failure) {
+      await recordDispatchFailure(rule, claimedAt, failure);
+      throw new Error("Initial auto-refill dispatch failed. The saved rule is paused; review existing assignments before resuming it. Do not create a duplicate rule.", { cause: failure });
+    }
+    const warnings = [...(initialAllocation.warnings ?? [])];
+    try {
+      await finishDispatch(rule, claimedAt, "active_recurring", initialAllocation.leadIds);
+    } catch (failure) {
+      console.error("Could not confirm activation of auto-refill rule", failure);
+      warnings.push("The initial batch was assigned, but auto-refill activation could not be confirmed. Review the saved rule before resuming it. Do not repeat the allocation.");
+    }
     return {
       id: data.id,
       allocatedCount: initialAllocation.allocatedCount,
       mode: "queue_replenish",
+      warnings,
     };
   }
 
@@ -540,12 +598,16 @@ export async function pauseScheduledAllocation(id: string): Promise<void> {
  * Resume a paused recurring automation rule.
  */
 export async function resumeScheduledAllocation(id: string): Promise<void> {
-  const { error } = await supabase()
-    .from("lead_allocation_schedules")
-    .update({ status: "active_recurring" })
-    .eq("id", id);
-
-  if (error) throw error;
+  // One-time jobs must return to pending, not the recurring-only state.
+  const { error: oneTimeError } = await supabase().from("lead_allocation_schedules")
+    .update({ status: "pending" }).eq("id", id).eq("status", "paused").eq("schedule_mode", "once_scheduled");
+  if (oneTimeError) throw oneTimeError;
+  const { error: dailyError } = await supabase().from("lead_allocation_schedules")
+    .update({ status: "active_recurring" }).eq("id", id).eq("status", "paused").eq("schedule_mode", "daily_recurring");
+  if (dailyError) throw dailyError;
+  const { error: refillError } = await supabase().from("lead_allocation_schedules")
+    .update({ status: "active_recurring" }).eq("id", id).eq("status", "paused").eq("schedule_mode", "queue_replenish");
+  if (refillError) throw refillError;
 }
 
 /**
@@ -578,15 +640,10 @@ export async function listStaffWorkload(): Promise<StaffWorkloadSummary[]> {
 
   if (listsErr) throw listsErr;
 
-  const { data: listItems, error: itemsErr } = await supabase()
+  const listItems = await readAllRows(supabase()
     .from("lead_list_items")
-    .select(`
-      list_id,
-      lead_id,
-      leads:lead_id (status)
-    `);
-
-  if (itemsErr) throw itemsErr;
+    .select("list_id, lead_id, leads:lead_id (status)")
+    .order("lead_id"));
 
   // Compute total & completed leads per list
   const statsByListId = new Map<string, { total: number; completed: number }>();
@@ -597,7 +654,7 @@ export async function listStaffWorkload(): Promise<StaffWorkloadSummary[]> {
 
     const lead: any = Array.isArray(item.leads) ? item.leads[0] : item.leads;
     const status = lead?.status ?? "new";
-    const isCompleted = ["contacted", "booked", "cancelled", "follow_up"].includes(status);
+    const isCompleted = isCompletedLeadStatus(status);
     if (isCompleted) {
       current.completed += 1;
     }
@@ -668,8 +725,41 @@ export async function transferStaffLeads(
     .select("id");
 
   if (listErr) throw listErr;
+  invalidateLeadListCache();
 
   return { transferredCount: updatedLists?.length ?? 0 };
+}
+
+type DispatchRule = { id: string; status: string; last_run_at?: string | null; notes?: string | null };
+function dispatchTimestamp(rule: DispatchRule, now = Date.now()): string {
+  return new Date(Math.max(now, (rule.last_run_at ? Date.parse(rule.last_run_at) : 0) + 1)).toISOString();
+}
+
+/** Atomically suspend dispatch while a worker owns the rule. No local lock: this works across server instances. */
+async function claimDispatch(rule: DispatchRule, claimedAt: string): Promise<boolean> {
+  let query = supabase().from("lead_allocation_schedules")
+    .update({ status: "paused", last_run_at: claimedAt })
+    .eq("id", rule.id).eq("status", rule.status);
+  query = rule.last_run_at ? query.eq("last_run_at", rule.last_run_at) : query.is("last_run_at", null);
+  const { data, error } = await query.select("id");
+  if (error) throw error;
+  return !!data?.length;
+}
+
+async function finishDispatch(rule: DispatchRule, claimedAt: string, status: string, leadIds: string[]): Promise<void> {
+  const { data, error } = await supabase().from("lead_allocation_schedules")
+    .update({ status, allocated_lead_ids: leadIds })
+    .eq("id", rule.id).eq("status", "paused").eq("last_run_at", claimedAt).select("id");
+  if (error) throw error;
+  if (!data?.length) throw new Error("The rule changed during dispatch; its current state was preserved.");
+}
+
+async function recordDispatchFailure(rule: DispatchRule, claimedAt: string, error: unknown): Promise<void> {
+  const message = error instanceof Error ? error.message : "Dispatch failed";
+  const { error: recordError } = await supabase().from("lead_allocation_schedules")
+    .update({ notes: `${rule.notes ? `${rule.notes}\n` : ""}Dispatch paused: ${message}. Review existing assignments before resuming.` })
+    .eq("id", rule.id).eq("status", "paused").eq("last_run_at", claimedAt);
+  if (recordError) console.error("Could not record dispatch failure", recordError);
 }
 
 /**
@@ -685,45 +775,54 @@ export async function processQueueAutoRefills(): Promise<{ refilledStaffCount: n
       .eq("status", "active_recurring")
       .eq("schedule_mode", "queue_replenish");
 
-    if (error || !activeRules || activeRules.length === 0) return { refilledStaffCount: 0 };
-
-    const workload = await listStaffWorkload();
-    const workloadByAdminId = new Map(workload.map((w) => [w.adminUserId, w]));
+    if (error) throw error;
+    if (!activeRules || activeRules.length === 0) return { refilledStaffCount: 0 };
 
     let refilled = 0;
     for (const rule of activeRules) {
       const threshold = rule.replenish_threshold ?? 5;
-      const assignees = rule.assignee_ids ?? [];
-
-      for (const adminId of assignees) {
-        const staff = workloadByAdminId.get(adminId);
-        const remaining = staff ? staff.pendingLeadsCount : 0;
-
-        if (remaining <= threshold) {
-          const res = await executeLeadAllocation({
-            lead_count: rule.lead_count ?? 10,
-            conditions: rule.conditions ?? {},
-            assignee_ids: [adminId],
-            target_list_id: rule.target_list_id,
-            notes: `Auto-refill triggered (Queue ${remaining} <= ${threshold})`,
-            allocation_type: "queue_replenish",
-          });
-
-          if (res.allocatedCount > 0) {
-            refilled++;
-            await supabase()
-              .from("lead_allocation_schedules")
-              .update({ last_run_at: new Date().toISOString() })
-              .eq("id", rule.id);
-          }
+      // Refresh for each rule: an earlier rule may already have replenished
+      // the same staff member during this pass.
+      const workload = await listStaffWorkload();
+      const workloadByAdminId = new Map(workload.map((staff) => [staff.adminUserId, staff]));
+      let eligible: string[];
+      if (rule.target_list_id) {
+        const list = await getLeadList(rule.target_list_id);
+        if (!list || (list.pending_count ?? 0) > threshold) continue;
+        eligible = [];
+      } else {
+        eligible = [...new Set<string>(rule.assignee_ids ?? [])].filter((id) => {
+          const staff = workloadByAdminId.get(id);
+          return !!staff && staff.pendingLeadsCount <= threshold;
+        });
+        if (!eligible.length) continue;
+      }
+      // lead_count is the total per batch, just as in initial allocation.
+      const claimedAt = dispatchTimestamp(rule);
+      if (!await claimDispatch(rule, claimedAt)) continue;
+      try {
+        const res = await executeLeadAllocation({
+          lead_count: rule.lead_count ?? 10,
+          conditions: rule.conditions ?? {},
+          assignee_ids: eligible,
+          target_list_id: rule.target_list_id,
+          notes: `Auto-refill triggered (pending queue <= ${threshold})`,
+          allocation_type: "queue_replenish",
+        });
+        if (res.allocatedCount > 0) {
+          refilled += rule.target_list_id ? 1 : Math.min(eligible.length, res.allocatedCount);
         }
+        await finishDispatch(rule, claimedAt, "active_recurring", res.leadIds);
+      } catch (error) {
+        await recordDispatchFailure(rule, claimedAt, error);
+        throw error;
       }
     }
 
     return { refilledStaffCount: refilled };
   } catch (err) {
     console.error("processQueueAutoRefills error:", err);
-    return { refilledStaffCount: 0 };
+    throw err;
   }
 }
 
@@ -737,42 +836,42 @@ export async function processScheduledJobs(): Promise<{ executedCount: number }>
     let executed = 0;
 
     // 1. Process pending one-time schedules due now
-    const { data: pendingJobs } = await supabase()
+    const { data: pendingJobs, error: pendingError } = await supabase()
       .from("lead_allocation_schedules")
       .select("*")
       .eq("status", "pending")
       .eq("schedule_mode", "once_scheduled")
       .lte("scheduled_for", nowIso);
 
+    if (pendingError) throw pendingError;
     for (const job of pendingJobs ?? []) {
-      const res = await executeLeadAllocation({
-        lead_count: job.lead_count,
-        conditions: job.conditions ?? {},
-        assignee_ids: job.assignee_ids ?? [],
-        target_list_id: job.target_list_id,
-        notes: `Scheduled release executed`,
-        allocation_type: "scheduled",
-      });
-
-      await supabase()
-        .from("lead_allocation_schedules")
-        .update({
-          status: "completed",
-          allocated_lead_ids: res.leadIds,
-          last_run_at: nowIso,
-        })
-        .eq("id", job.id);
-
-      executed++;
+      const claimedAt = dispatchTimestamp(job, now.getTime());
+      if (!await claimDispatch(job, claimedAt)) continue;
+      try {
+        const res = await executeLeadAllocation({
+          lead_count: job.lead_count,
+          conditions: job.conditions ?? {},
+          assignee_ids: job.assignee_ids ?? [],
+          target_list_id: job.target_list_id,
+          notes: "Scheduled release executed",
+          allocation_type: "scheduled",
+        });
+        await finishDispatch(job, claimedAt, "completed", res.leadIds);
+        executed++;
+      } catch (error) {
+        await recordDispatchFailure(job, claimedAt, error);
+        throw error;
+      }
     }
 
     // 2. Process active daily recurring releases
-    const { data: recurringRules } = await supabase()
+    const { data: recurringRules, error: recurringError } = await supabase()
       .from("lead_allocation_schedules")
       .select("*")
       .eq("status", "active_recurring")
       .eq("schedule_mode", "daily_recurring");
 
+    if (recurringError) throw recurringError;
     if (recurringRules && recurringRules.length > 0) {
       const istDateStr = now.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); // "YYYY-MM-DD"
       const istTimeStr = now.toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false }); // "HH:MM"
@@ -793,24 +892,23 @@ export async function processScheduledJobs(): Promise<{ executedCount: number }>
         }
 
         if (isDayDue && isTimeDue && !alreadyRanToday) {
-          const res = await executeLeadAllocation({
-            lead_count: rule.lead_count ?? 10,
-            conditions: rule.conditions ?? {},
-            assignee_ids: rule.assignee_ids ?? [],
-            target_list_id: rule.target_list_id,
-            notes: `Daily recurring release (${targetTime} IST)`,
-            allocation_type: "daily_recurring",
-          });
-
-          await supabase()
-            .from("lead_allocation_schedules")
-            .update({
-              allocated_lead_ids: res.leadIds,
-              last_run_at: nowIso,
-            })
-            .eq("id", rule.id);
-
-          executed++;
+          const claimedAt = dispatchTimestamp(rule, now.getTime());
+          if (!await claimDispatch(rule, claimedAt)) continue;
+          try {
+            const res = await executeLeadAllocation({
+              lead_count: rule.lead_count ?? 10,
+              conditions: rule.conditions ?? {},
+              assignee_ids: rule.assignee_ids ?? [],
+              target_list_id: rule.target_list_id,
+              notes: `Daily recurring release (${targetTime} IST)`,
+              allocation_type: "daily_recurring",
+            });
+            await finishDispatch(rule, claimedAt, "active_recurring", res.leadIds);
+            executed++;
+          } catch (error) {
+            await recordDispatchFailure(rule, claimedAt, error);
+            throw error;
+          }
         }
       }
     }
@@ -821,7 +919,7 @@ export async function processScheduledJobs(): Promise<{ executedCount: number }>
     return { executedCount: executed };
   } catch (err) {
     console.error("processScheduledJobs error:", err);
-    return { executedCount: 0 };
+    throw err;
   }
 }
 
@@ -832,10 +930,13 @@ export async function processScheduledJobs(): Promise<{ executedCount: number }>
 export async function recycleAndReassignLeads(
   req: RecycleLeadsRequest,
 ): Promise<RecycleLeadsResult> {
-  const targetStaffIds = req.target_admin_user_ids ?? [];
+  const targetStaffIds = [...new Set(req.target_admin_user_ids ?? [])];
   if (!req.target_list_id && targetStaffIds.length === 0) {
     throw new Error("Please select at least one target telecaller or destination list.");
   }
+
+  if (req.source_list_id && req.source_list_id === req.target_list_id) throw new Error("Choose a different destination list.");
+  await assertAllocationDestination(targetStaffIds, req.target_list_id);
 
   // 1. Gather all candidate lead items from the source
   let listItemsQuery = supabase()
@@ -862,9 +963,7 @@ export async function recycleAndReassignLeads(
     throw new Error("Source list or source staff member is required.");
   }
 
-  listItemsQuery = listItemsQuery.range(0, 49999);
-  const { data: rawItems, error: itemsErr } = await listItemsQuery;
-  if (itemsErr) throw itemsErr;
+  const rawItems = await readAllRows(listItemsQuery.order("lead_id", { ascending: true }));
 
   const allowedStatuses = new Set(req.include_statuses ?? ["call_not_responded", "contacted", "cancelled", "draft"]);
   const specificIdsSet = req.specific_lead_ids && req.specific_lead_ids.length > 0
@@ -881,7 +980,7 @@ export async function recycleAndReassignLeads(
     const status = lead.status ?? "new";
     const matchesSpecific = !specificIdsSet || specificIdsSet.has(lead.id);
 
-    if (allowedStatuses.has(status) && matchesSpecific) {
+    if (status !== "booked" && allowedStatuses.has(status) && matchesSpecific) {
       leadsToRecycle.push({ leadId: lead.id, sourceListId: item.list_id });
     } else {
       protectedCount++;
@@ -894,47 +993,20 @@ export async function recycleAndReassignLeads(
 
   const leadIdsToMove = Array.from(new Set(leadsToRecycle.map((l) => l.leadId)));
 
-  // 2. If reset_status_to_new is true, update status in leads table
-  if (req.reset_status_to_new) {
-    const { error: updateStatusErr } = await supabase()
-      .from("leads")
-      .update({ status: "new" })
-      .in("id", leadIdsToMove);
-    if (updateStatusErr) throw updateStatusErr;
-  }
-
-  // 3. Remove these leads from their source lists using batch delete
-  const leadsBySourceList: Record<string, string[]> = {};
-  for (const item of leadsToRecycle) {
-    if (!leadsBySourceList[item.sourceListId]) {
-      leadsBySourceList[item.sourceListId] = [];
-    }
-    leadsBySourceList[item.sourceListId].push(item.leadId);
-  }
-
-  for (const [sourceListId, ids] of Object.entries(leadsBySourceList)) {
-    const { error: delErr } = await supabase()
-      .from("lead_list_items")
-      .delete()
-      .eq("list_id", sourceListId)
-      .in("lead_id", ids);
-    if (delErr) {
-      console.error("Error removing recycled leads from source list:", delErr);
-    }
-  }
-
   const createdListIds: string[] = [];
 
   // 4. Assign to target(s)
   if (req.target_list_id) {
     await addLeadsToList(req.target_list_id, leadIdsToMove);
   } else if (targetStaffIds.length > 0) {
-    const perStaff = Math.ceil(leadIdsToMove.length / targetStaffIds.length);
+    const perStaff = Math.floor(leadIdsToMove.length / targetStaffIds.length);
+    const remainder = leadIdsToMove.length % targetStaffIds.length;
     const dateStr = new Date().toLocaleDateString("en-IN");
 
     for (let i = 0; i < targetStaffIds.length; i++) {
       const staffId = targetStaffIds[i];
-      const slice = leadIdsToMove.slice(i * perStaff, (i + 1) * perStaff);
+      const start = i * perStaff + Math.min(i, remainder);
+      const slice = leadIdsToMove.slice(start, start + perStaff + (i < remainder ? 1 : 0));
       if (slice.length === 0) continue;
 
       const listName = req.create_new_list_name
@@ -960,6 +1032,18 @@ export async function recycleAndReassignLeads(
       await supabase().from("lead_allocations_log").insert(logRows);
     }
   }
+
+  // Reset only after the moves succeed; a failed destination must not alter source dispositions.
+  if (req.reset_status_to_new) {
+    const { error: updateStatusErr } = await supabase()
+      .from("leads")
+      .update({ status: "new" })
+      .in("id", leadIdsToMove);
+    if (updateStatusErr) throw updateStatusErr;
+  }
+
+  invalidateAreaCountsCache();
+  invalidateLeadListCache();
 
   return {
     recycledCount: leadIdsToMove.length,

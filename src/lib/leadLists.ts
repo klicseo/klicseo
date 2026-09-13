@@ -1,4 +1,8 @@
+import { isCustomLeadFolder, moveLeadsToCustomFolder, removeLeadFromCustomFolder } from "./lead-folder-items";
 import "server-only";
+import { readAllRows } from "./db-pagination";
+import { matchesLeadSearch } from "./lead-search-shared";
+import { isCompletedLeadStatus } from "./leads-shared";
 import { supabase } from "./supabase";
 import { currentAdmin } from "./admin-auth";
 import { getAdminUser } from "./admin-users";
@@ -25,18 +29,15 @@ export function invalidateLeadListCache(): void {
  */
 export async function insertLeadList(list: NewLeadList): Promise<LeadListRow> {
   invalidateLeadListCache();
-  // Get current admin to set created_by if not provided
-  const admin = await currentAdmin();
-  if (!admin) {
-    throw new Error("No admin authenticated");
+  // Scheduled jobs explicitly pass null; interactive callers resolve their authenticated creator.
+  let createdBy = list.created_by;
+  if (createdBy === undefined) {
+    const admin = await currentAdmin();
+    if (!admin) throw new Error("No admin authenticated");
+    const adminRow = await getAdminUser(admin.email);
+    createdBy = adminRow?.id ?? null;
   }
-  const adminRow = await getAdminUser(admin.email);
-
-  const payload = {
-    ...list,
-    created_by: list.created_by ?? adminRow?.id ?? null,
-    // assigned_employee_id is already in list or will be undefined/null
-  };
+  const payload = { ...list, created_by: createdBy };
 
   const { data, error } = await supabase()
     .from("lead_lists")
@@ -57,8 +58,9 @@ export async function listLeadLists(opts: {
   createdBy?: string;
   assignedAdminUserId?: string;
   search?: string;
+  includeFolders?: boolean;
 } = {}): Promise<LeadListRow[]> {
-  const cacheKey = `${opts.createdBy || ""}_${opts.assignedAdminUserId || ""}_${opts.search || ""}`;
+  const cacheKey = `${opts.createdBy || ""}_${opts.assignedAdminUserId || ""}_${opts.search || ""}_${opts.includeFolders ?? false}`;
   const now = Date.now();
   const cached = leadListsCache.get(cacheKey);
   if (cached && cached.expires > now) {
@@ -86,8 +88,8 @@ export async function listLeadLists(opts: {
     q = q.ilike("name", `%${opts.search}%`);
   }
 
-  const { data, error } = await q;
-  if (error) throw error;
+  const rows = await readAllRows(q.order("id", { ascending: true }));
+  const data = opts.includeFolders ? rows : rows.filter((row) => !row.is_custom_folder);
 
   const assignedAdminUserIds = Array.from(
     new Set(
@@ -122,14 +124,21 @@ export async function listLeadLists(opts: {
   >();
 
   if (listIds.length > 0) {
-    const { data: allItems, error: itemsErr } = await supabase()
-      .from("lead_list_items")
-      .select("list_id, lead_id, leads:lead_id (status)")
-      .in("list_id", listIds)
-      .range(0, 49999);
+    const allItems: { list_id: string; lead_id: string; leads: unknown }[] = [];
+    for (const table of ["lead_list_items", "lead_folder_items"]) {
+      const ids = data.filter((row) => Boolean(row.is_custom_folder) === (table === "lead_folder_items")).map((row) => row.id);
+      for (let offset = 0; offset < ids.length; offset += 250) {
+        allItems.push(...await readAllRows(supabase().from(table)
+          .select("list_id, lead_id, leads:lead_id (status)")
+          .in("list_id", ids.slice(offset, offset + 250)).order("lead_id")));
+      }
+    }
+    const scopedAssignments = new Set(allItems.filter((item) => !data.find((row) => row.id === item.list_id)?.is_custom_folder).map((item) => item.lead_id));
 
-    if (!itemsErr && allItems) {
+
+    if (allItems) {
       for (const item of allItems) {
+        if (opts.assignedAdminUserId && data.find((row) => row.id === item.list_id)?.is_custom_folder && !scopedAssignments.has(item.lead_id)) continue;
         const lid = item.list_id;
         const current = statsByListId.get(lid) ?? {
           total: 0,
@@ -144,7 +153,7 @@ export async function listLeadLists(opts: {
         current.statuses[status] = (current.statuses[status] ?? 0) + 1;
 
         // Completed = contacted, booked, cancelled, follow_up
-        if (["contacted", "booked", "cancelled", "follow_up"].includes(status)) {
+        if (isCompletedLeadStatus(status)) {
           current.completed += 1;
         } else {
           current.pending += 1;
@@ -203,31 +212,23 @@ export async function getLeadList(listId: string): Promise<LeadListRow | null> {
   if (error) throw error;
   if (!data) return null;
 
-  // Single fast query for exact list lead counts and status breakdown
-  const [countResult, { data: allItems }] = await Promise.all([
-    supabase()
-      .from("lead_list_items")
-      .select("*", { count: "exact", head: true })
-      .eq("list_id", listId),
-    supabase()
-      .from("lead_list_items")
-      .select("lead_id, leads:lead_id (status)")
-      .eq("list_id", listId)
-      .range(0, 49999),
-  ]);
+  const allItems = await readAllRows(supabase()
+    .from(data.is_custom_folder ? "lead_folder_items" : "lead_list_items")
+    .select("lead_id, leads:lead_id (status)")
+    .eq("list_id", listId)
+    .order("lead_id", { ascending: true }));
 
-  let total = countResult.count ?? 0;
+  const total = allItems.length;
   let completed = 0;
   let pending = 0;
   const statuses: Record<string, number> = {};
 
   if (allItems) {
-    total = allItems.length;
     for (const item of allItems) {
       const lead: any = Array.isArray(item.leads) ? item.leads[0] : item.leads;
       const status = (lead?.status ?? "new") as string;
       statuses[status] = (statuses[status] ?? 0) + 1;
-      if (["contacted", "booked", "cancelled", "follow_up"].includes(status)) {
+      if (isCompletedLeadStatus(status)) {
         completed += 1;
       } else {
         pending += 1;
@@ -272,30 +273,35 @@ export async function getLeadList(listId: string): Promise<LeadListRow | null> {
 export async function addLeadsToList(listId: string, leadIds: string[]): Promise<void> {
   if (leadIds.length === 0) return;
   invalidateLeadListCache();
+  if (await isCustomLeadFolder(listId)) {
+    await moveLeadsToCustomFolder(listId, leadIds);
+    return;
+  }
 
   const uniqueLeadIds = Array.from(new Set(leadIds));
 
-  // 1. Enforce exclusive 1-to-1 list rule: remove these leads from any previous lists
-  const { error: delError } = await supabase()
-    .from("lead_list_items")
-    .delete()
-    .in("lead_id", uniqueLeadIds);
-
-  if (delError) throw delError;
-
-  // 2. Insert into target list
-  const items = uniqueLeadIds.map((leadId) => ({
-    list_id: listId,
-    lead_id: leadId,
-  }));
-
-  const { error } = await supabase()
-    .from("lead_list_items")
-    .insert(items);
-
+  // One statement preserves existing membership if the target is invalid or the write fails.
+  const items = uniqueLeadIds.map((leadId) => ({ list_id: listId, lead_id: leadId, added_at: new Date().toISOString() }));
+  const { error } = await supabase().from("lead_list_items")
+    .upsert(items, { onConflict: "lead_id" });
   if (error) throw error;
 
   markLeadsAsAssigned(uniqueLeadIds);
+}
+
+/** Claim available leads without changing any existing assignment (including concurrent claims). */
+export async function claimUnassignedLeads(listId: string, leadIds: string[]): Promise<string[]> {
+  const ids = [...new Set(leadIds)];
+  if (!ids.length) return [];
+  const { data, error } = await supabase().from("lead_list_items")
+    .upsert(ids.map((leadId) => ({ list_id: listId, lead_id: leadId })), {
+      onConflict: "lead_id", ignoreDuplicates: true,
+    }).select("lead_id");
+  if (error) throw error;
+  const claimed = (data ?? []).map((row) => row.lead_id);
+  invalidateLeadListCache();
+  invalidateAssignedLeadsCache();
+  return claimed;
 }
 
 /**
@@ -305,6 +311,10 @@ export async function addLeadsToList(listId: string, leadIds: string[]): Promise
  */
 export async function removeLeadFromList(listId: string, leadId: string): Promise<void> {
   invalidateLeadListCache();
+  if (await isCustomLeadFolder(listId)) {
+    await removeLeadFromCustomFolder(listId, leadId);
+    return;
+  }
   invalidateAssignedLeadsCache();
   const { error } = await supabase()
     .from("lead_list_items")
@@ -326,6 +336,7 @@ export async function getLeadsInList(listId: string, opts: {
   offset?: number;
   status?: string | "all";
   search?: string;
+  assignedAdminUserId?: string;
 } = {}): Promise<LeadRow[]> {
   const ENCRYPTED_LEAD_FIELDS = [
     "phone",
@@ -336,29 +347,17 @@ export async function getLeadsInList(listId: string, opts: {
     "notes",
   ] as const;
 
-  // We need to join lead_list_items with leads and unseal the lead fields
-  let q = supabase()
-    .from("lead_list_items")
+  const customFolder = await isCustomLeadFolder(listId);
+  // Join the collection membership with leads and unseal fields.
+  const q = supabase()
+    .from(customFolder ? "lead_folder_items" : "lead_list_items")
     .select(`
       lead_id,
       leads:lead_id (*)
     `)
     .eq("list_id", listId);
 
-  if (opts.limit) {
-    if (opts.offset) {
-      q = q.range(opts.offset, opts.offset + opts.limit - 1);
-    } else {
-      q = q.limit(opts.limit);
-    }
-  } else {
-    // Default to high capacity range (50000) so large lists are never cut off
-    q = q.range(opts.offset ?? 0, (opts.offset ?? 0) + 49999);
-  }
-
-  const { data, error } = await q;
-
-  if (error) throw error;
+  const data = await readAllRows(q.order("lead_id"));
 
   // Flatten the joined data and unseal encrypted fields
   const leads = (data ?? [])
@@ -368,22 +367,22 @@ export async function getLeadsInList(listId: string, opts: {
 
   // In-memory filtering if needed
   let filtered = leads;
+  if (customFolder && opts.assignedAdminUserId) {
+    const assigned = await readAllRows(supabase().from("lead_list_items")
+      .select("lead_id, lead_lists!inner(assigned_admin_user_id)")
+      .eq("lead_lists.assigned_admin_user_id", opts.assignedAdminUserId).order("lead_id"));
+    const allowed = new Set(assigned.map((item) => item.lead_id));
+    filtered = filtered.filter((lead) => allowed.has(lead.id));
+  }
 
   if (opts.status && opts.status !== "all") {
     filtered = filtered.filter((lead: any) => lead.status === opts.status);
   }
 
-  if (opts.search) {
-    const s = opts.search.toLowerCase();
-    filtered = filtered.filter((lead: any) =>
-      lead.name?.toLowerCase().includes(s) ||
-      lead.phone?.includes(s) ||
-      lead.car_brand?.toLowerCase().includes(s) ||
-      lead.car_model?.toLowerCase().includes(s)
-    );
-  }
+  if (opts.search) filtered = filtered.filter((lead) => matchesLeadSearch(lead, opts.search!));
+  const offset = opts.offset ?? 0;
+  return filtered.slice(offset, opts.limit == null ? undefined : offset + opts.limit) as LeadRow[];
 
-  return filtered as LeadRow[];
 }
 
 /**
@@ -408,19 +407,7 @@ export async function updateLeadList(listId: string, updates: Partial<NewLeadLis
 export async function deleteLeadList(listId: string): Promise<void> {
   invalidateLeadListCache();
   invalidateAssignedLeadsCache();
-  // 1. Delete junction table entries
-  await supabase()
-    .from("lead_list_items")
-    .delete()
-    .eq("list_id", listId);
-
-  // 2. Set foreign references to null
-  await supabase()
-    .from("lead_allocation_schedules")
-    .update({ target_list_id: null })
-    .eq("target_list_id", listId);
-
-  // 3. Delete the lead list
+  // Foreign keys cascade memberships and null schedule targets in the same transaction.
   const { error } = await supabase()
     .from("lead_lists")
     .delete()

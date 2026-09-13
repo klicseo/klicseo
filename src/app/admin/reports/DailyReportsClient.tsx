@@ -461,7 +461,7 @@ export default function DailyReportsClient({
                     myMetric.queueBreakdown.not_responded > 0 ? `${myMetric.queueBreakdown.not_responded} No Answer` : null,
                     myMetric.queueBreakdown.cancelled > 0 ? `${myMetric.queueBreakdown.cancelled} Cancelled` : null,
                   ].filter(Boolean).join(", ")})`
-                : `${myMetric?.pendingUncalledLeads ?? 0} fresh leads awaiting call`
+                : `${myMetric?.pendingUncalledLeads ?? 0} leads awaiting a call or retry`
               : "Calling on this date"}
           </div>
         </div>

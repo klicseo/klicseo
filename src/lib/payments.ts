@@ -1,4 +1,5 @@
 import "server-only";
+import { readAllRows } from "./db-pagination";
 import { supabase } from "./supabase";
 import { seal, unseal } from "./crypto";
 import type { PaymentInput, PaymentRow } from "./payments-shared";
@@ -14,8 +15,7 @@ function unsealRow(row: PaymentRow): PaymentRow {
 
 /** All payment rows for a given month. */
 export async function listPeriodPayments(period: string): Promise<PaymentRow[]> {
-  const { data, error } = await supabase().from("payments").select(COLS).eq("period", period);
-  if (error) throw error;
+  const data = await readAllRows(supabase().from("payments").select(COLS).eq("period", period).order("id"));
   return ((data ?? []) as PaymentRow[]).map(unsealRow);
 }
 
@@ -25,9 +25,12 @@ export async function listPeriodPayments(period: string): Promise<PaymentRow[]> 
  */
 export async function listPaymentsForLeads(leadIds: string[]): Promise<PaymentRow[]> {
   if (leadIds.length === 0) return [];
-  const { data, error } = await supabase().from("payments").select(COLS).in("lead_id", leadIds);
-  if (error) throw error;
-  return ((data ?? []) as PaymentRow[]).map(unsealRow);
+  const data: PaymentRow[] = [];
+  for (let offset = 0; offset < leadIds.length; offset += 250) {
+    const batch = await readAllRows(supabase().from("payments").select(COLS).in("lead_id", leadIds.slice(offset, offset + 250)).order("id"));
+    data.push(...batch as PaymentRow[]);
+  }
+  return data.map(unsealRow);
 }
 
 /** A customer's payment history (newest month first). */

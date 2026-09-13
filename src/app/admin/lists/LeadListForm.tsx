@@ -44,7 +44,7 @@ export default function LeadListForm({
         />
       </div>
 
-      <div>
+      {employees.length > 0 && <div>
         <label className="text-[10px] font-semibold text-white/40 uppercase tracking-widest mb-1 block">
           Assign to admin team member (optional)
         </label>
@@ -60,7 +60,7 @@ export default function LeadListForm({
             </option>
           ))}
         </select>
-      </div>
+      </div>}
 
       <div>
         {state.error && <p className="text-[12px] text-red-300">{state.error}</p>}

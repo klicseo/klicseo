@@ -30,7 +30,7 @@ describe("Column Preferences Logic", () => {
     };
 
     // Merging logic with required protection
-    const merged = { ...customPreferences };
+    const merged: Record<string, boolean> = { ...customPreferences };
     for (const col of sampleCols) {
       if (col.required) merged[col.key] = true;
     }

@@ -20,7 +20,7 @@ export default async function LeadUploadPage({
 
   const { listId } = await searchParams;
   const adminRow = me.email ? await getAdminUser(me.email) : null;
-  const isStaff = me.role === "staff";
+  const isStaff = me.role !== "super_admin";
 
   const [leadLists, adminUsers] = await Promise.all([
     listLeadLists(isStaff && adminRow?.id ? { assignedAdminUserId: adminRow.id } : undefined),

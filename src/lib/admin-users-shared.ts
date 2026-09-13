@@ -23,9 +23,9 @@ export interface PermissionDef {
 // The toggleable capabilities shown when granting a staff member access.
 export const ALL_PERMISSIONS: PermissionDef[] = [
   { id: "leads.view", label: "View leads", blurb: "See the leads list and lead details." },
-  { id: "leads.manage", label: "Manage leads", blurb: "Create, edit, and delete leads.", implies: "leads.view" },
+  { id: "leads.manage", label: "Manage leads", blurb: "Create and edit assigned leads. Deletion also requires an administrator role.", implies: "leads.view" },
   { id: "employees.view", label: "View employees", blurb: "See the employees section." },
-  { id: "employees.manage", label: "Manage employees", blurb: "Create, edit, and delete employees.", implies: "employees.view" },
+  { id: "employees.manage", label: "Manage employees", blurb: "Create and edit assigned employees. Deletion also requires an administrator role.", implies: "employees.view" },
   { id: "payments.view", label: "View payments", blurb: "See the payments grid and per-customer history." },
   { id: "payments.manage", label: "Manage payments", blurb: "Mark paid/pending, edit amounts, send WhatsApp messages.", implies: "payments.view" },
 ];

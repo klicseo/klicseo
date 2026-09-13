@@ -36,6 +36,7 @@ describe("Area & Year Territory Analytics", () => {
         {
           id: "lead-v1",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "upload",
@@ -46,6 +47,7 @@ describe("Area & Year Territory Analytics", () => {
         {
           id: "lead-v2",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "upload",
@@ -56,6 +58,7 @@ describe("Area & Year Territory Analytics", () => {
         {
           id: "lead-v3",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "upload",
@@ -66,6 +69,7 @@ describe("Area & Year Territory Analytics", () => {
         {
           id: "lead-v4-2025",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2025",
           source: "upload",
@@ -76,6 +80,7 @@ describe("Area & Year Territory Analytics", () => {
         {
           id: "lead-p1",
           primaryLocality: "Puzhuthivakkam",
+          pincode: null,
           area: "Puzhuthivakkam",
           year: "2026",
           source: "upload",

@@ -21,7 +21,7 @@ export default async function EmployeeUploadPage() {
   return (
     <AdminShell require="employees.manage" section="employees">
       <EmployeeUploadClient
-        adminUsers={adminUsers}
+        adminUsers={adminUsers.filter((user) => me.role === "super_admin" || user.email === me.email)}
         availableJobs={jobs.map((j) => ({ slug: j.slug, title: j.title }))}
       />
     </AdminShell>

@@ -34,8 +34,8 @@ export default async function AdminShell({
   const leadsItems = [
     canManageAccess && can("leads.view") && { href: "/admin", label: "All Leads", icon: "Inbox" as const, exact: true },
     canManageAccess && can("leads.view") && { href: "/admin/analytics", label: "Analytics", icon: "TrendingUp" as const },
-    canManageAccess && can("leads.view") && { href: "/admin/lists", label: "Lead Lists", icon: "ClipboardList" as const },
-    !canManageAccess && can("leads.view") && { href: "/admin/my-lists", label: "My Leads", icon: "Inbox" as const },
+    isSuperAdmin && can("leads.view") && { href: "/admin/lists", label: "Lead Lists", icon: "ClipboardList" as const },
+    !isSuperAdmin && can("leads.view") && { href: "/admin/my-lists", label: "My Leads", icon: "Inbox" as const },
     can("leads.view") && { href: "/admin/reports", label: "Daily Reports", icon: "BarChart3" as const },
     can("leads.manage") && { href: "/admin/new", label: "Add Lead", icon: "PlusCircle" as const },
     can("leads.manage") && { href: "/admin/upload", label: "Upload Leads", icon: "UploadCloud" as const },

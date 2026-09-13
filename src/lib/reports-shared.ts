@@ -23,7 +23,7 @@ export interface StaffDailyMetric {
   pendingUncalledLeads: number;
   queueBreakdown?: {
     total: number;
-    pending: number;        // new + draft
+    pending: number;        // new, draft, unanswered, and custom pending statuses
     completed: number;      // total - pending
     booked: number;
     contacted: number;

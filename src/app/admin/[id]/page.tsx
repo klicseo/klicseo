@@ -138,7 +138,8 @@ export default async function LeadDetailPage({
   const { id } = await params;
   const { returnTo, fromListName } = (await searchParams) ?? {};
   const me = await currentAdmin();
-  if (!me) notFound();
+  if (!me?.permissions.includes("leads.view")) notFound();
+  const canManage = me.permissions.includes("leads.manage");
 
   let lead;
   try {
@@ -209,20 +210,21 @@ export default async function LeadDetailPage({
 
           <div className="flex items-center gap-2.5">
             <LeadStatusControl
+              canManage={canManage}
               id={lead.id}
               status={lead.status}
               color={statusColorMap[lead.status] || "#C9A84C"}
               customStatuses={configuredStatuses}
             />
 
-            <Link
+            {canManage && <Link
               href={`/admin/${lead.id}/edit${returnTo ? `?returnTo=${encodeURIComponent(returnTo)}` : ""}`}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/5 border border-white/10 text-white/80 hover:text-white hover:bg-white/10 transition-all"
             >
               <Pencil size={13} /> Edit
-            </Link>
+            </Link>}
 
-            <DeleteLeadButton id={lead.id} returnTo={fallbackHref} />
+            {canManage && me.role !== "staff" && <DeleteLeadButton id={lead.id} returnTo={fallbackHref} />}
           </div>
         </div>
 
@@ -497,7 +499,7 @@ export default async function LeadDetailPage({
                 <MessageSquare size={15} /> Internal Telecaller Notes
               </div>
 
-              <LeadNotesEditor id={lead.id} initialNotes={lead.notes ?? ""} />
+              {canManage ? <LeadNotesEditor id={lead.id} initialNotes={lead.notes ?? ""} /> : <p className="text-sm whitespace-pre-wrap">{lead.notes || "No notes"}</p>}
             </div>
 
             {/* Campaign & Allocation History (Persistent across list recycling) */}

@@ -100,6 +100,7 @@ export default async function AdminLeadsPage({
   }>;
 }) {
   const me = await currentAdmin();
+  if (!me) redirect("/admin/login");
   if (me && !me.permissions.includes("leads.view")) {
     if (me.permissions.includes("employees.view")) redirect("/admin/employees");
     if (me.role === "super_admin" || me.role === "admin") redirect("/admin/access");
@@ -166,10 +167,10 @@ export default async function AdminLeadsPage({
 
   try {
     const isAreaSubFoldersDeck = Boolean(
-      folder && !area && folder !== "all_master" && folder !== "all" && (folder.startsWith("year_") || folder === "website_form" || folder === "hot_leads")
+      folder && !area && !q?.trim() && folder !== "all_master" && folder !== "all" && (folder.startsWith("year_") || folder === "website_form" || folder === "hot_leads")
     );
     const isInsideFolder = Boolean(folder && folder !== "all");
-    const needsSpreadsheetLeads = Boolean(isInsideFolder && !isAreaSubFoldersDeck);
+    const needsSpreadsheetLeads = Boolean((isInsideFolder || q?.trim()) && !isAreaSubFoldersDeck);
     const canManageLists = Boolean(me?.permissions.includes("leads.manage"));
     const activeYear = folder?.startsWith("year_") ? folder.replace("year_", "") : year;
 
@@ -218,7 +219,7 @@ export default async function AdminLeadsPage({
           })
         : Promise.resolve([]),
       canManageLists && !isRootFoldersView
-        ? listLeadLists({ assignedAdminUserId })
+        ? listLeadLists({ assignedAdminUserId, includeFolders: true })
         : Promise.resolve([]),
       canManageLists && needsSpreadsheetLeads
         ? listServiceCounts({
@@ -230,7 +231,7 @@ export default async function AdminLeadsPage({
             assignment: assignmentFilter,
           })
         : Promise.resolve([]),
-      canManageLists && !isRootFoldersView
+      canManageLists && isSuperAdmin
         ? listAssignableAdminUsers()
         : Promise.resolve([]),
       areaFilter && needsSpreadsheetLeads
@@ -284,7 +285,7 @@ export default async function AdminLeadsPage({
   }
 
   const isAreaSubFoldersDeck = Boolean(
-    folder && !area && folder !== "all_master" && folder !== "all" && (folder.startsWith("year_") || folder === "website_form" || folder === "hot_leads")
+    folder && !area && !q?.trim() && folder !== "all_master" && folder !== "all" && (folder.startsWith("year_") || folder === "website_form" || folder === "hot_leads")
   );
   const isInsideFolder = Boolean(folder && folder !== "all");
 
@@ -357,7 +358,7 @@ export default async function AdminLeadsPage({
 
             {canManage && (
               <>
-                {(isSuperAdmin || me?.role === "admin") && (
+                {isSuperAdmin && (
                   <FolderAllocationButton
                     folder={folder}
                     area={areaFilter}
@@ -393,13 +394,14 @@ export default async function AdminLeadsPage({
         </div>
 
         {/* ROOT VIEW: Folder Explorer (Computer Folder Cards) */}
-        {!isInsideFolder ? (
+        {!isInsideFolder && !q?.trim() ? (
           <FolderExplorerView
             systemFolders={folderSummaries.systemFolders}
             customFolders={folderSummaries.customFolders}
             totalLeads={folderSummaries.totalLeads}
             adminUsers={assignableUsers}
             canManage={(isSuperAdmin || me?.role === "admin") && canManage}
+            canDelete={isSuperAdmin}
           />
         ) : isAreaSubFoldersDeck ? (
           /* LEVEL 2 VIEW: Area Sub-Folders Deck for Website Form, Hot Leads, or Year Cohort */
@@ -431,7 +433,7 @@ export default async function AdminLeadsPage({
             totalBooked={activeFolderSummary?.bookedCount ?? statusSummary.booked}
             adminUsers={assignableUsers}
             leadLists={leadLists}
-            canManage={canManage}
+            canManage={isSuperAdmin && canManage}
           />
         ) : (
           /* INSIDE FOLDER VIEW: Excel Spreadsheet Sheet & Controls */
@@ -730,11 +732,13 @@ export default async function AdminLeadsPage({
               <div className="flex items-center justify-between gap-3 flex-wrap border-t border-white/[0.06] pt-3">
                 <form className="flex-1 min-w-[260px] flex items-center gap-2">
                   {filter !== "all" && <input type="hidden" name="status" value={filter} />}
-                  {areaFilter && <input type="hidden" name="area" value={areaFilter} />}
+                  {area && <input type="hidden" name="area" value={area} />}
                   {serviceFilter && <input type="hidden" name="service" value={serviceFilter} />}
                   {assignmentFilter && <input type="hidden" name="assignment" value={assignmentFilter} />}
                   {folder && <input type="hidden" name="folder" value={folder} />}
-                  {currentView !== "cards" && <input type="hidden" name="view" value={currentView} />}
+                  <input type="hidden" name="view" value={currentView} />
+                  {year && <input type="hidden" name="year" value={year} />}
+                  {source && <input type="hidden" name="source" value={source} />}
 
                   <div className="relative flex-1">
                     <Search
@@ -823,7 +827,7 @@ export default async function AdminLeadsPage({
                     </Link>
                   )}
 
-                  {canManage && (
+                  {isSuperAdmin && canManage && (
                     <FolderAllocationButton
                       variant="toolbar"
                       folder={folder}

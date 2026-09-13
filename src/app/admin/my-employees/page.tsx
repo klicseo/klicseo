@@ -60,7 +60,7 @@ export default async function MyEmployeesPage({
   let jobCounts: Array<{ job_role: string; count: number }> = [];
   try {
     [employees, roleLabel, jobCounts] = await Promise.all([
-      listEmployees({ assignedAdminUserId: user.id, status: statusFilter, jobRole: roleFilter }),
+      listEmployees({ assignedAdminUserId: user.id, jobRole: roleFilter }),
       jobTitleMap(),
       listJobCounts({ assignedAdminUserId: user.id }),
     ]);
@@ -78,6 +78,8 @@ export default async function MyEmployeesPage({
   for (const e of employees) {
     statusCounts.set(e.status, (statusCounts.get(e.status) ?? 0) + 1);
   }
+
+  const visibleEmployees = statusFilter === "all" ? employees : employees.filter((employee) => employee.status === statusFilter);
 
   return (
     <AdminShell require="employees.view" section="employees">
@@ -131,7 +133,7 @@ export default async function MyEmployeesPage({
         </div>
       )}
 
-      {employees.length === 0 ? (
+      {visibleEmployees.length === 0 ? (
         <div className="text-center py-16 text-white/40 text-sm">No employees match this filter.</div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-white/10">
@@ -146,7 +148,7 @@ export default async function MyEmployeesPage({
               </tr>
             </thead>
             <tbody>
-              {employees.map((e, i) => (
+              {visibleEmployees.map((e, i) => (
                 <tr key={e.id} className="group border-t border-white/5 hover:bg-white/[0.02]">
                   <td className="sticky left-0 z-10 w-12 min-w-[48px] bg-[#050E21] group-hover:bg-[#091733] border-r border-white/[0.04] px-3 py-2 text-white/40 text-xs tabular-nums">{i + 1}</td>
                   <td className="px-3 py-2">

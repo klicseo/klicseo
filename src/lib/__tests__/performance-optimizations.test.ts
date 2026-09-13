@@ -11,7 +11,7 @@ vi.mock("@/lib/supabase", () => ({
     from: mockFrom.mockReturnThis(),
     select: mockSelect.mockReturnThis(),
     eq: mockEq.mockReturnThis(),
-    range: mockRange.mockReturnThis(),
+    range: mockRange,
     order: vi.fn().mockReturnThis(),
     in: vi.fn().mockReturnThis(),
     not: vi.fn().mockReturnThis(),
@@ -67,20 +67,13 @@ describe("Performance Optimizations", () => {
   });
 
   it("listFolderSummaries correctly builds system and custom folders", async () => {
-    mockSelect.mockReturnValueOnce({
-      order: vi.fn().mockResolvedValueOnce({
-        data: [
-          {
-            id: "list-1",
-            name: "Velachery Campaign",
-            assigned_admin_user_id: "staff-1",
-            admin_users: { email: "staff@example.com", employees: { name: "Staff User" } },
-            lead_list_items: [{ lead_id: "l1" }],
-          },
-        ],
-        error: null,
-      }),
-    });
+    mockRange.mockResolvedValueOnce({
+      data: [{ id: "list-1", name: "Velachery Campaign", assigned_admin_user_id: "staff-1", admin_users: { email: "staff@example.com", employees: { name: "Staff User" } } }],
+      error: null,
+    }).mockResolvedValueOnce({ data: [{ list_id: "list-1", lead_id: "l1" }], error: null })
+      .mockResolvedValueOnce({ data: [{ key: "lead_custom_folder:list-1", value: "true" }], error: null })
+      .mockResolvedValueOnce({ data: [], error: null })
+      .mockResolvedValueOnce({ data: [{ list_id: "list-1", lead_id: "l1" }], error: null });
 
     const { listFolderSummaries } = await import("@/lib/leads");
     const res = await listFolderSummaries();
@@ -88,5 +81,6 @@ describe("Performance Optimizations", () => {
     expect(res.systemFolders.length).toBeGreaterThan(0);
     expect(res.customFolders.length).toBe(1);
     expect(res.customFolders[0].name).toBe("Velachery Campaign");
+    expect(res.customFolders[0].count).toBe(1);
   });
 });

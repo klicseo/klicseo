@@ -52,7 +52,7 @@ function parseToken(token: string | undefined): ParsedToken | null {
   const expiry = Number(expiryStr);
   if (!Number.isFinite(expiry)) return null;
   const expected = sign(`${expiryStr}.${emailPart}`);
-  if (expected.length !== sig.length) return null;
+  if (!/^[0-9a-f]{64}$/.test(sig)) return null;
   const ok = timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(sig, "hex"));
   let email = "";
   try {
@@ -195,7 +195,7 @@ export async function resolveScope(me: AdminPrincipal): Promise<LeadScope | null
   if (me.role === "super_admin") return { kind: "all" };
   const { getAdminUser } = await import("./admin-users");
   const row = await getAdminUser(me.email);
-  if (!row?.id) return null;
+  if (!row?.id) throw new Error("No admin account found.");
   return { kind: "assigned", adminUserId: row.id };
 }
 

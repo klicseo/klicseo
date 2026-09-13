@@ -21,6 +21,7 @@ import {
   ArrowRight,
 } from "lucide-react";
 import {
+  getAllocationFilterOptionsAction,
   previewMatchingLeadsAction,
   submitLeadAllocationAction,
 } from "./routing-actions";
@@ -47,6 +48,7 @@ const ALL_STATUS_OPTIONS = [
   { id: "call_not_responded", label: "Call Not Responded", color: "from-orange-500/20 to-orange-500/5 text-orange-300 border-orange-500/40" },
   { id: "follow_up", label: "Follow Up", color: "from-purple-500/20 to-purple-500/5 text-purple-300 border-purple-500/40" },
   { id: "contacted", label: "Contacted", color: "from-teal-500/20 to-teal-500/5 text-teal-300 border-teal-500/40" },
+  { id: "booked", label: "Booked", color: "from-emerald-500/20 to-emerald-500/5 text-emerald-300 border-emerald-500/40" },
   { id: "cancelled", label: "Cancelled", color: "from-rose-500/20 to-rose-500/5 text-rose-300 border-rose-500/40" },
 ];
 
@@ -65,14 +67,6 @@ const COMMON_AREAS = [
   "T. Nagar",
   "Medavakkam",
   "Perungudi",
-];
-
-const COMMON_SERVICES = [
-  "Ceramic Coating",
-  "Paint Protection Film (PPF)",
-  "Deep Interior Cleaning",
-  "Foam Wash & Wax",
-  "Paint Correction & Polishing",
 ];
 
 const PRICE_PRESETS = [3000, 5000, 10000, 15000];
@@ -101,9 +95,26 @@ export default function LeadAllocationModal({
   const [availableCount, setAvailableCount] = useState<number | null>(initialCount ?? null);
   const [totalUnallocatedPool, setTotalUnallocatedPool] = useState<number | null>(initialCount ?? null);
   const [isCounting, setIsCounting] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [statusOptions, setStatusOptions] = useState(ALL_STATUS_OPTIONS);
+  const [serviceOptions, setServiceOptions] = useState<string[]>([]);
+  const [filterOptionsError, setFilterOptionsError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    setFilterOptionsError(null);
+    getAllocationFilterOptionsAction().then((options) => {
+      if (cancelled) return;
+      setStatusOptions(options.statuses.map((status) => ({ ...status, color: ALL_STATUS_OPTIONS.find((item) => item.id === status.id)?.color ?? "from-slate-500/20 to-slate-500/5 text-slate-300 border-slate-500/40" })));
+      setServiceOptions(options.services);
+    }).catch(() => {
+      if (!cancelled) setFilterOptionsError("Could not load service and status options. Close and reopen to retry.");
+    });
+    return () => { cancelled = true; };
+  }, [isOpen]);
 
   // 2. Conditions
-  const [selectedStatuses, setSelectedStatuses] = useState<string[]>(["new", "draft"]);
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
 
   const [selectedAreas, setSelectedAreas] = useState<string[]>(defaultArea ? [defaultArea] : []);
   const [customAreaInput, setCustomAreaInput] = useState("");
@@ -143,23 +154,36 @@ export default function LeadAllocationModal({
   // Live query available matching leads count (folder-aware + location-scoped)
   useEffect(() => {
     if (!isOpen) return;
-    if (availableCount === null) setIsCounting(true);
+    let cancelled = false;
+    setIsCounting(true);
+    setPreviewError(null);
 
     const timer = setTimeout(async () => {
-      const res = await previewMatchingLeadsAction({
-        folder: selectedFolder !== "all" ? selectedFolder : undefined,
-        statuses: selectedStatuses.length > 0 ? selectedStatuses : undefined,
-        areas: selectedAreas.length > 0 ? selectedAreas : undefined,
-        pincodes: selectedPincodes.length > 0 ? selectedPincodes : undefined,
-        services: selectedServices.length > 0 ? selectedServices : undefined,
-        min_price: minPrice ? Number(minPrice) : null,
-      });
-      setAvailableCount(res.count);
-      setTotalUnallocatedPool(res.totalUnallocated);
-      setIsCounting(false);
+      try {
+        const res = await previewMatchingLeadsAction({
+          folder: selectedFolder !== "all" ? selectedFolder : undefined,
+          statuses: selectedStatuses.length > 0 ? selectedStatuses : undefined,
+          areas: selectedAreas.length > 0 ? selectedAreas : undefined,
+          pincodes: selectedPincodes.length > 0 ? selectedPincodes : undefined,
+          services: selectedServices.length > 0 ? selectedServices : undefined,
+          min_price: minPrice ? Number(minPrice) : null,
+        });
+        if (cancelled) return;
+        if (res.error) throw new Error(res.error);
+        setAvailableCount(res.count);
+        setTotalUnallocatedPool(res.totalUnallocated);
+      } catch (err) {
+        if (!cancelled) {
+          setAvailableCount(null);
+          setTotalUnallocatedPool(null);
+          setPreviewError(err instanceof Error ? err.message : "Could not load the available leads.");
+        }
+      } finally {
+        if (!cancelled) setIsCounting(false);
+      }
     }, 50);
 
-    return () => clearTimeout(timer);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [isOpen, selectedFolder, selectedStatuses, selectedAreas, selectedPincodes, selectedServices, minPrice]);
 
   if (!isOpen) return null;
@@ -218,12 +242,14 @@ export default function LeadAllocationModal({
 
   // Handlers for Assignee
   const toggleAssignee = (userId: string) => {
+    setTargetListId("");
     setSelectedAssigneeIds((prev) =>
       prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId],
     );
   };
 
   const selectAllAssignees = () => {
+    setTargetListId("");
     if (selectedAssigneeIds.length === adminUsers.length) {
       setSelectedAssigneeIds([]);
     } else {
@@ -233,7 +259,7 @@ export default function LeadAllocationModal({
 
   // Clear All Filters
   const clearAllFilters = () => {
-    setSelectedStatuses(["new", "draft"]);
+    setSelectedStatuses([]);
     setSelectedAreas([]);
     setSelectedPincodes([]);
     setSelectedServices([]);
@@ -241,9 +267,7 @@ export default function LeadAllocationModal({
   };
 
   const hasActiveFilters =
-    selectedStatuses.length !== 2 ||
-    !selectedStatuses.includes("new") ||
-    !selectedStatuses.includes("draft") ||
+    selectedStatuses.length > 0 ||
     selectedAreas.length > 0 ||
     selectedPincodes.length > 0 ||
     selectedServices.length > 0 ||
@@ -278,7 +302,7 @@ export default function LeadAllocationModal({
         lead_count: Number(leadCount),
         conditions: {
           folder: selectedFolder !== "all" ? selectedFolder : undefined,
-          statuses: selectedStatuses.length > 0 ? selectedStatuses : ["new", "draft"],
+          statuses: selectedStatuses.length > 0 ? selectedStatuses : undefined,
           areas: selectedAreas.length > 0 ? selectedAreas : undefined,
           pincodes: selectedPincodes.length > 0 ? selectedPincodes : undefined,
           services: selectedServices.length > 0 ? selectedServices : undefined,
@@ -288,19 +312,20 @@ export default function LeadAllocationModal({
         target_list_id: targetListId || null,
         scheduled_for: scheduledForIso,
         recurring_time: recurringTime,
-        replenish_threshold: Number(replenishThreshold) || 5,
+        replenish_threshold: Number(replenishThreshold),
         notes: notes.trim() || null,
       });
 
       if (res.ok) {
+        const notifySuccess = (message: string) => onSuccess([message, ...(res.warnings ?? [])].join(" "));
         if (res.mode === "daily_recurring") {
-          onSuccess(`Configured everyday schedule: ${leadCount} leads at ${recurringTime} IST`);
+          notifySuccess(`Configured everyday schedule: ${leadCount} leads at ${recurringTime} IST`);
         } else if (res.mode === "queue_replenish") {
-          onSuccess(`Configured queue auto-refill: refill ${leadCount} leads when staff queue drops below ${replenishThreshold}`);
+          notifySuccess(`Initial batch: ${res.allocatedCount ?? 0} leads. Saved auto-refill rule for ${leadCount} leads when the queue reaches or falls below ${replenishThreshold}.`);
         } else if (res.mode === "once_scheduled") {
-          onSuccess(`Scheduled ${leadCount} leads for ${scheduleDate} at ${scheduleTime} IST`);
+          notifySuccess(`Scheduled ${leadCount} leads for ${scheduleDate} at ${scheduleTime} IST`);
         } else {
-          onSuccess(`Successfully allocated ${res.allocatedCount} leads to your team!`);
+          notifySuccess(`Successfully allocated ${res.allocatedCount} leads to your team!`);
         }
         onClose();
       } else {
@@ -398,6 +423,7 @@ export default function LeadAllocationModal({
             )}
           </div>
 
+          {filterOptionsError && <p role="alert" className="text-xs text-rose-300">{filterOptionsError}</p>}
           {/* Section 1: Lead Count & Live Pool Indicator */}
           <div className="p-4 rounded-2xl bg-[#050E21] border border-white/10 space-y-3">
             <div className="flex items-center justify-between flex-wrap gap-2">
@@ -411,6 +437,8 @@ export default function LeadAllocationModal({
                 </span>
                 {isCounting ? (
                   <Loader2 size={12} className="animate-spin text-[#C9A84C]" />
+                ) : previewError ? (
+                  <span role="alert" className="text-rose-300">{previewError}</span>
                 ) : (
                   <div className="flex items-center gap-1.5">
                     <strong
@@ -492,7 +520,7 @@ export default function LeadAllocationModal({
               )}
             </div>
 
-            {/* A. Lead Statuses (Default: New & Draft) */}
+            {/* A. Lead Statuses (Default: All) */}
             <div className="space-y-2 pt-1 border-t border-white/[0.04]">
               <div className="flex items-center justify-between">
                 <label className="text-white/70 font-semibold flex items-center gap-1.5 text-xs">
@@ -501,21 +529,22 @@ export default function LeadAllocationModal({
                 </label>
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] text-emerald-400 font-semibold">
-                    {selectedStatuses.length} selected
+                    {selectedStatuses.length ? `${selectedStatuses.length} selected` : "All statuses"}
                   </span>
                   <button
                     type="button"
-                    onClick={() => setSelectedStatuses(["new", "draft"])}
+                    onClick={() => setSelectedStatuses([])}
                     className="text-[10px] text-white/40 hover:text-white underline"
                   >
-                    Reset (New & Draft)
+                    All statuses
                   </button>
                 </div>
               </div>
 
+              <p className="text-[11px] text-white/50">All unassigned leads are eligible by default. Select statuses to narrow the pool; allocation keeps each lead’s current status.</p>
               {/* Status Option Chips */}
               <div className="flex flex-wrap gap-1.5">
-                {ALL_STATUS_OPTIONS.map((status) => {
+                {statusOptions.map((status) => {
                   const isSelected = selectedStatuses.includes(status.id);
                   return (
                     <button
@@ -731,7 +760,7 @@ export default function LeadAllocationModal({
 
               {/* Quick Service Chips */}
               <div className="flex flex-wrap gap-1.5">
-                {COMMON_SERVICES.map((srv) => {
+                {serviceOptions.map((srv) => {
                   const isSelected = selectedServices.includes(srv);
                   return (
                     <button
@@ -864,11 +893,11 @@ export default function LeadAllocationModal({
               </label>
               <select
                 value={targetListId}
-                onChange={(e) => setTargetListId(e.target.value)}
+                onChange={(e) => { setTargetListId(e.target.value); setSelectedAssigneeIds([]); }}
                 className="w-full bg-[#071228] border border-white/10 rounded-xl px-3 py-1.5 text-white text-xs mt-1"
               >
                 <option value="">— Auto-create Staff Lead Lists (Default) —</option>
-                {lists.map((l) => (
+                {lists.filter((l) => !l.is_custom_folder).map((l) => (
                   <option key={l.id} value={l.id}>
                     {l.name}
                   </option>

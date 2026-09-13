@@ -3,7 +3,7 @@ import Link from "next/link";
 import { Wallet, ChevronLeft, ChevronRight, Download } from "lucide-react";
 import AdminShell from "../AdminShell";
 import AdminError from "../AdminError";
-import { currentAdmin } from "@/lib/admin-auth";
+import { currentAdmin, resolveScope } from "@/lib/admin-auth";
 import { listLeads } from "@/lib/leads";
 import { listPeriodPayments, listPaymentsForLeads, currentPeriod, isValidPeriod, periodFromIso, periodsBetween } from "@/lib/payments";
 import { isServiceOptionId, SERVICE_OPTIONS } from "@/lib/pricing";
@@ -38,10 +38,13 @@ export default async function PaymentsPage({
   const { month } = await searchParams;
   const period = month && isValidPeriod(month) ? month : currentPeriod();
 
+  const scope = await resolveScope(me);
+  if (!scope) redirect("/admin/login");
+  const assignedAdminUserId = scope.kind === "assigned" ? scope.adminUserId : undefined;
   let customers, payments, settings;
   try {
     [customers, payments, settings] = await Promise.all([
-      listLeads({ status: "booked", limit: 500 }),
+      listLeads({ status: "booked", limit: 5000, assignedAdminUserId }),
       listPeriodPayments(period),
       getSiteSettings(),
     ]);
@@ -132,7 +135,7 @@ export default async function PaymentsPage({
           <MessageTemplatesEditor initial={settings.messageTemplates} />
         )}
 
-        <PaymentsTable period={period} periodLabel={monthLabel(period)} items={items} canManage={me.permissions.includes("payments.manage") || me.permissions.includes("leads.manage")} />
+        <PaymentsTable period={period} periodLabel={monthLabel(period)} items={items} canManage={me.permissions.includes("payments.manage")} />
       </div>
     </AdminShell>
   );

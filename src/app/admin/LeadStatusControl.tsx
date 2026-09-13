@@ -11,13 +11,18 @@ export default function LeadStatusControl({
   color,
   customStatuses,
   className = "",
+  canManage = true,
+  onSaved,
 }: {
   id: string;
   status: LeadStatus;
   color?: string;
   customStatuses?: CustomLeadStatus[];
   className?: string;
+  canManage?: boolean;
+  onSaved?: (status: LeadStatus) => void;
 }) {
+  const [error, setError] = useState<string | null>(null);
   const [pending, start] = useTransition();
   const [currentStatus, setCurrentStatus] = useState<LeadStatus>(status);
 
@@ -40,12 +45,16 @@ export default function LeadStatusControl({
           color: activeColor,
         }));
 
+  if (!canManage) return <span>{options.find((item) => item.id === currentStatus)?.label ?? currentStatus}</span>;
+
   return (
+    <>
     <select
       value={currentStatus}
       disabled={pending}
       onChange={(e) => {
         const next = e.target.value as LeadStatus;
+        setError(null);
         setCurrentStatus(next);
         const fd = new FormData();
         fd.append("id", id);
@@ -53,8 +62,9 @@ export default function LeadStatusControl({
         start(async () => {
           try {
             await setStatusAction(fd);
+            onSaved?.(next);
           } catch (err) {
-            console.error("Failed to update status:", err);
+            setError(err instanceof Error ? err.message : "Could not update status.");
             setCurrentStatus(status); // Revert to previous status on failure
           }
         });
@@ -70,5 +80,7 @@ export default function LeadStatusControl({
         </option>
       ))}
     </select>
+    {error && <span role="alert" className="block text-xs text-red-300">{error}</span>}
+    </>
   );
 }

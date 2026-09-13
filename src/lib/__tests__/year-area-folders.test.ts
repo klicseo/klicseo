@@ -8,6 +8,7 @@ vi.mock("@/lib/supabase", () => ({
     from: vi.fn().mockReturnThis(),
     select: vi.fn().mockReturnThis(),
     eq: vi.fn().mockReturnThis(),
+    order: vi.fn().mockReturnThis(),
     range: vi.fn().mockResolvedValue({ data: [], error: null }),
   }),
 }));
@@ -25,6 +26,7 @@ describe("Year Area Sub-Folders Hierarchy", () => {
         {
           id: "lead-1",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "upload",
@@ -33,6 +35,7 @@ describe("Year Area Sub-Folders Hierarchy", () => {
         {
           id: "lead-2",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "upload",
@@ -41,6 +44,7 @@ describe("Year Area Sub-Folders Hierarchy", () => {
         {
           id: "lead-3",
           primaryLocality: "Puzhuthivakkam",
+          pincode: null,
           area: "Puzhuthivakkam",
           year: "2026",
           source: "upload",
@@ -49,6 +53,7 @@ describe("Year Area Sub-Folders Hierarchy", () => {
         {
           id: "lead-4",
           primaryLocality: "Madipakkam",
+          pincode: null,
           area: "Madipakkam",
           year: "2025",
           source: "upload",

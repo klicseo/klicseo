@@ -4,6 +4,7 @@
 export interface LeadListRow {
   id: string;
   name: string;
+  is_custom_folder?: boolean;
   created_at: string;
   created_by: string | null; // admin user id who created the list
   assigned_admin_user_id: string | null; // admin user id assigned to this list
@@ -20,7 +21,8 @@ export interface LeadListRow {
 
 export interface NewLeadList {
   name: string;
-  created_by?: string; // optional, will be set from current admin on server
+  is_custom_folder?: boolean;
+  created_by?: string | null; // optional, will be set from current admin on server
   assigned_admin_user_id?: string | null;
 }
 

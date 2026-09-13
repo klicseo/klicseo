@@ -1,4 +1,8 @@
+import { getManualLeadFolderIds } from "./lead-folder-registry";
 import "server-only";
+import { readAllRows } from "./db-pagination";
+import { addLeadsToList, invalidateLeadListCache } from "./leadLists";
+import { matchesLeadSearch } from "./lead-search-shared";
 import { supabase } from "./supabase";
 import { sealFields, unsealFields, unseal, phoneHash, normalizePhone } from "./crypto";
 import {
@@ -41,6 +45,7 @@ const serviceCountsCache = new Map<string, { data: Array<{ service: string; coun
 const callRemindersCache = new Map<string, { data: CallReminder[]; expires: number }>();
 
 export function invalidateLeadCaches(): void {
+  invalidateLeadListCache();
   statusSummaryCache.clear();
   serviceCountsCache.clear();
   callRemindersCache.clear();
@@ -189,10 +194,10 @@ export async function listServiceCounts(
   }
 
   if (options.folder && options.folder.match(/^[0-9a-fA-F-]{36}$/)) {
-    const { data: listItems } = await supabase()
-      .from("lead_list_items")
+    const listItems = await readAllRows(supabase()
+      .from("lead_collection_items")
       .select("lead_id")
-      .eq("list_id", options.folder);
+      .eq("list_id", options.folder).order("lead_id"));
     const listSet = new Set((listItems ?? []).map((i) => i.lead_id));
     candidateLeads = candidateLeads.filter((l) => listSet.has(l.id));
   }
@@ -323,19 +328,19 @@ export async function listLeadStatusSummary(
   let candidateLeads = locationIndex.allLeads;
 
   if (options.assignedAdminUserId) {
-    const { data: items } = await supabase()
+    const items = await readAllRows(supabase()
       .from("lead_list_items")
       .select("lead_id, lead_lists!inner(assigned_admin_user_id)")
-      .eq("lead_lists.assigned_admin_user_id", options.assignedAdminUserId);
+      .eq("lead_lists.assigned_admin_user_id", options.assignedAdminUserId).order("lead_id"));
     const allowed = new Set((items ?? []).map((r: { lead_id: string }) => r.lead_id));
     candidateLeads = candidateLeads.filter((l) => allowed.has(l.id));
   }
 
   if (options.folder && options.folder.match(/^[0-9a-fA-F-]{36}$/)) {
-    const { data: listItems } = await supabase()
-      .from("lead_list_items")
+    const listItems = await readAllRows(supabase()
+      .from("lead_collection_items")
       .select("lead_id")
-      .eq("list_id", options.folder);
+      .eq("list_id", options.folder).order("lead_id"));
     const listSet = new Set((listItems ?? []).map((i) => i.lead_id));
     candidateLeads = candidateLeads.filter((l) => listSet.has(l.id));
   }
@@ -379,21 +384,15 @@ export async function listLeadStatusSummary(
     candidateLeads = candidateLeads.filter((l) => l.service === options.service);
   }
 
-  if (options.search && options.search.trim()) {
-    const s = sanitizeSearch(options.search);
-    if (s) {
-      const orParts = SEARCH_FIELDS.map((f) => `${f}.ilike.%${s}%`);
-      const ph = phoneHash(options.search);
-      if (ph && normalizePhone(options.search).length >= 7) {
-        orParts.push(`phone_hash.eq.${ph}`);
-      }
-      const { data: searchMatches } = await supabase()
-        .from("leads")
-        .select("id")
-        .or(orParts.join(","));
-      const matchSet = new Set((searchMatches ?? []).map((m: { id: string }) => m.id));
-      candidateLeads = candidateLeads.filter((l) => matchSet.has(l.id));
-    }
+  if (options.serviceOption && options.serviceOption !== "all") candidateLeads = candidateLeads.filter((lead) => lead.service_option === options.serviceOption);
+  if (options.source && options.source !== "all") {
+    candidateLeads = candidateLeads.filter((lead) => lead.source === options.source);
+  }
+  if (options.fromIso) candidateLeads = candidateLeads.filter((lead) => !!lead.created_at && Date.parse(lead.created_at) >= Date.parse(options.fromIso!));
+  if (options.toIso) candidateLeads = candidateLeads.filter((lead) => !!lead.created_at && Date.parse(lead.created_at) <= Date.parse(options.toIso!));
+
+  if (options.search?.trim()) {
+    candidateLeads = await filterLeadsBySearch(candidateLeads, options.search);
   }
 
   const assignedSet = await getAllAssignedLeadIds();
@@ -467,6 +466,24 @@ export interface PaginatedLeadsResult {
   totalPages: number;
 }
 
+/** Match after decryption, in bounded batches, within the caller's filtered scope. */
+async function filterLeadsBySearch<T extends { id: string }>(candidates: T[], search: string): Promise<T[]> {
+  const matches = new Set<string>();
+  for (let offset = 0; offset < candidates.length; offset += 250) {
+    const batch = candidates.slice(offset, offset + 250);
+    const { data, error } = await supabase().from("leads")
+      .select("id,name,phone,car_number,car_brand,car_model,area,address,pincode,service,service_option")
+      .in("id", batch.map((lead) => lead.id));
+    if (error) throw error;
+    const summaries = new Map(batch.map((lead) => [lead.id, lead]));
+    for (const row of data ?? []) {
+      const lead = unsealFields(row, ENCRYPTED_LEAD_FIELDS)!;
+      if (matchesLeadSearch({ ...summaries.get(row.id), ...lead }, search)) matches.add(row.id);
+    }
+  }
+  return candidates.filter((lead) => matches.has(lead.id));
+}
+
 /**
  * Fetch a paginated slice of leads with total match count for UI pagination.
  */
@@ -482,19 +499,19 @@ export async function listPaginatedLeads(
   let candidateLeads = locationIndex.allLeads;
 
   if (opts.assignedAdminUserId) {
-    const { data: assignedLeadIds } = await supabase()
+    const assignedLeadIds = await readAllRows(supabase()
       .from("lead_list_items")
       .select("lead_id, lead_lists!inner(assigned_admin_user_id)")
-      .eq("lead_lists.assigned_admin_user_id", opts.assignedAdminUserId);
+      .eq("lead_lists.assigned_admin_user_id", opts.assignedAdminUserId).order("lead_id"));
     const allowed = new Set((assignedLeadIds ?? []).map((r: { lead_id: string }) => r.lead_id));
     candidateLeads = candidateLeads.filter((l) => allowed.has(l.id));
   }
 
   if (opts.folder && opts.folder.match(/^[0-9a-fA-F-]{36}$/)) {
-    const { data: listItems } = await supabase()
-      .from("lead_list_items")
+    const listItems = await readAllRows(supabase()
+      .from("lead_collection_items")
       .select("lead_id")
-      .eq("list_id", opts.folder);
+      .eq("list_id", opts.folder).order("lead_id"));
     const listSet = new Set((listItems ?? []).map((i) => i.lead_id));
     candidateLeads = candidateLeads.filter((l) => listSet.has(l.id));
   }
@@ -554,27 +571,21 @@ export async function listPaginatedLeads(
     }
   }
 
-  if (opts.search && opts.search.trim()) {
-    const s = sanitizeSearch(opts.search);
-    if (s) {
-      const orParts = SEARCH_FIELDS.map((f) => `${f}.ilike.%${s}%`);
-      const ph = phoneHash(opts.search);
-      if (ph && normalizePhone(opts.search).length >= 7) {
-        orParts.push(`phone_hash.eq.${ph}`);
-      }
-      const { data: searchMatches } = await supabase()
-        .from("leads")
-        .select("id")
-        .or(orParts.join(","));
-      const matchSet = new Set((searchMatches ?? []).map((m: { id: string }) => m.id));
-      candidateLeads = candidateLeads.filter((l) => matchSet.has(l.id));
-    }
+  if (opts.serviceOption && opts.serviceOption !== "all") candidateLeads = candidateLeads.filter((lead) => lead.service_option === opts.serviceOption);
+  if (opts.source && opts.source !== "all") {
+    candidateLeads = candidateLeads.filter((lead) => lead.source === opts.source);
+  }
+  if (opts.fromIso) candidateLeads = candidateLeads.filter((lead) => !!lead.created_at && Date.parse(lead.created_at) >= Date.parse(opts.fromIso!));
+  if (opts.toIso) candidateLeads = candidateLeads.filter((lead) => !!lead.created_at && Date.parse(lead.created_at) <= Date.parse(opts.toIso!));
+
+  if (opts.search?.trim()) {
+    candidateLeads = await filterLeadsBySearch(candidateLeads, opts.search);
   }
 
+  candidateLeads = [...candidateLeads].sort((a, b) => (Date.parse(b.created_at ?? "") || 0) - (Date.parse(a.created_at ?? "") || 0));
   const totalCount = candidateLeads.length;
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
-  const from = (page - 1) * pageSize;
-  const slice = candidateLeads.slice(from, from + pageSize);
+  const slice = candidateLeads.slice(offset, offset + limit);
 
   const idsToFetch = slice.map((l) => l.id);
   if (idsToFetch.length === 0) {
@@ -587,12 +598,12 @@ export async function listPaginatedLeads(
     };
   }
 
-  const { data: fullRows, error: fetchErr } = await supabase()
-    .from("leads")
-    .select("*")
-    .in("id", idsToFetch);
-
-  if (fetchErr) throw fetchErr;
+  const fullRows: LeadRow[] = [];
+  for (let offset = 0; offset < idsToFetch.length; offset += 250) {
+    const { data, error } = await supabase().from("leads").select("*").in("id", idsToFetch.slice(offset, offset + 250));
+    if (error) throw error;
+    fullRows.push(...(data ?? []) as LeadRow[]);
+  }
 
   const fullMap = new Map((fullRows ?? []).map((r: any) => [r.id, r]));
   const hydratedLeads: LeadRow[] = [];
@@ -640,22 +651,33 @@ export async function listFolderSummaries(assignedAdminUserId?: string): Promise
 }> {
   let listQuery = supabase()
     .from("lead_lists")
-    .select("id, name, assigned_admin_user_id, admin_users(email, employees(name)), lead_list_items(lead_id)")
+    .select("id, name, is_custom_folder, assigned_admin_user_id, admin_users:assigned_admin_user_id(email, employees:employee_id(name))")
     .order("created_at", { ascending: false });
 
   if (assignedAdminUserId) {
     listQuery = listQuery.eq("assigned_admin_user_id", assignedAdminUserId);
   }
 
-  const [locationIndex, leadListsRes] = await Promise.all([
+  const [locationIndex, folderRows] = await Promise.all([
     getOrBuildLocationIndex(),
-    listQuery,
+    readAllRows(listQuery.order("id")),
   ]);
+  const itemsByList = new Map<string, { lead_id: string }[]>();
+  for (let offset = 0; offset < folderRows.length; offset += 250) {
+    const items = await readAllRows(supabase().from("lead_list_items")
+      .select("list_id, lead_id")
+      .in("list_id", folderRows.slice(offset, offset + 250).map((list) => list.id))
+      .order("lead_id"));
+    for (const item of items) {
+      const listItems = itemsByList.get(item.list_id) ?? [];
+      listItems.push(item);
+      itemsByList.set(item.list_id, listItems);
+    }
+  }
 
   let allLeads = locationIndex.allLeads;
   if (assignedAdminUserId) {
-    const userLists = (leadListsRes.data ?? []);
-    const allowedIds = new Set(userLists.flatMap((l: any) => (l.lead_list_items ?? []).map((i: any) => i.lead_id)));
+    const allowedIds = new Set(Array.from(itemsByList.values()).flatMap((items) => items.map((item) => item.lead_id)));
     allLeads = allLeads.filter((l) => allowedIds.has(l.id));
   }
 
@@ -719,9 +741,24 @@ export async function listFolderSummaries(assignedAdminUserId?: string): Promise
     });
   }
 
+  const manualFolderIds = await getManualLeadFolderIds(folderRows.map((list) => list.id));
+  for (const list of folderRows) if (list.is_custom_folder) manualFolderIds.add(list.id);
+  const visibleLeadIds = new Set(allLeads.map((lead) => lead.id));
+  const folderItemsByList = new Map<string, { lead_id: string }[]>();
+  const folderIds = [...manualFolderIds];
+  for (let offset = 0; offset < folderIds.length; offset += 250) {
+    const items = await readAllRows(supabase().from("lead_folder_items")
+      .select("list_id, lead_id").in("list_id", folderIds.slice(offset, offset + 250)).order("lead_id"));
+    for (const item of items) {
+      if (assignedAdminUserId && !visibleLeadIds.has(item.lead_id)) continue;
+      const rows = folderItemsByList.get(item.list_id) ?? [];
+      rows.push(item);
+      folderItemsByList.set(item.list_id, rows);
+    }
+  }
   const leadMap = locationIndex.leadMap;
-  const customFolders: FolderSummary[] = (leadListsRes.data ?? []).map((l: any) => {
-    const items = l.lead_list_items ?? [];
+  const customFolders: FolderSummary[] = folderRows.filter((list) => manualFolderIds.has(list.id)).map((l: any) => {
+    const items = folderItemsByList.get(l.id) ?? [];
     let booked = 0;
     for (const item of items) {
       const summary = leadMap.get(item.lead_id);
@@ -1064,6 +1101,7 @@ export async function bulkInsertLeads(
   opts: {
     duplicateStrategy?: "skip" | "update" | "allow";
     listId?: string | null;
+    scope?: LeadScope;
   } = {},
 ): Promise<BulkInsertLeadResult> {
   invalidateLeadCaches();
@@ -1121,6 +1159,11 @@ export async function bulkInsertLeads(
   for (const lead of leadsWithHashes) {
     const ph = lead.computed_phone_hash;
     const existingId = ph ? existingMap.get(ph) : undefined;
+    if (existingId && opts.scope && !(await isLeadInScope(existingId, opts.scope))) {
+      skipped++;
+      continue;
+    }
+
 
     if (existingId && duplicateStrategy === "skip") {
       skipped++;
@@ -1195,25 +1238,8 @@ export async function bulkInsertLeads(
   if (listId && allLeadIds.length > 0) {
     const uniqueIds = Array.from(new Set(allLeadIds));
     try {
-      // Remove from any previous lists first
-      await supabase()
-        .from("lead_list_items")
-        .delete()
-        .in("lead_id", uniqueIds);
-
-      const items = uniqueIds.map((leadId) => ({
-        list_id: listId,
-        lead_id: leadId,
-      }));
-
-      for (let i = 0; i < items.length; i += 200) {
-        const itemChunk = items.slice(i, i + 200);
-        const { error } = await supabase()
-          .from("lead_list_items")
-          .insert(itemChunk);
-        if (error) {
-          errors.push(`Failed to attach leads to list: ${error.message}`);
-        }
+      for (let i = 0; i < uniqueIds.length; i += 200) {
+        await addLeadsToList(listId, uniqueIds.slice(i, i + 200));
       }
     } catch (err) {
       errors.push(`Failed to attach leads to list: ${err instanceof Error ? err.message : String(err)}`);

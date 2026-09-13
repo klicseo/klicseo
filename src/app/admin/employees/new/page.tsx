@@ -1,3 +1,5 @@
+import { currentAdmin } from "@/lib/admin-auth";
+import { notFound } from "next/navigation";
 import AdminShell from "../../AdminShell";
 import EmployeeForm from "../EmployeeForm";
 import { createEmployeeAction } from "../actions";
@@ -5,6 +7,8 @@ import { listJobs } from "@/lib/jobs";
 import { listAssignableAdminUsers } from "@/lib/admin-users";
 
 export default async function NewEmployeePage() {
+  const me = await currentAdmin();
+  if (!me?.permissions.includes("employees.manage")) notFound();
   const [jobs, adminUsers] = await Promise.all([listJobs(), listAssignableAdminUsers()]);
   return (
     <AdminShell require="employees.manage" section="employees">
@@ -18,7 +22,7 @@ export default async function NewEmployeePage() {
           submitLabel="Save employee"
           pendingLabel="Saving…"
           jobs={jobs}
-          adminUsers={adminUsers}
+          adminUsers={adminUsers.filter((user) => me.role === "super_admin" || user.email === me.email)}
         />
       </div>
     </AdminShell>

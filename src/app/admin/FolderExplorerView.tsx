@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import type { FolderSummary } from "@/lib/leads";
 import CreateFolderModal from "./CreateFolderModal";
+import DeleteLeadListButton from "./lists/DeleteLeadListButton";
 
 interface Props {
   systemFolders: FolderSummary[];
@@ -27,6 +28,7 @@ interface Props {
   totalLeads: number;
   adminUsers?: { id: string; email: string; name: string }[];
   canManage?: boolean;
+  canDelete?: boolean;
 }
 
 export default function FolderExplorerView({
@@ -35,6 +37,7 @@ export default function FolderExplorerView({
   totalLeads,
   adminUsers = [],
   canManage = true,
+  canDelete = false,
 }: Props) {
   const router = useRouter();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -70,12 +73,17 @@ export default function FolderExplorerView({
               <span>Lead Folders & Category Directory</span>
             </h2>
             <p className="text-xs text-white/50">
-              Browse leads organized by channel, year, or custom telecaller campaign folders.
+              Browse leads by channel, year, or folders you create.
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2.5 flex-wrap">
+          <form action="/admin" className="flex items-center gap-2">
+            <input type="hidden" name="folder" value="all_master" />
+            <input type="search" name="q" aria-label="Search leads" placeholder="Search leads: name, phone, car…" className="w-64 max-w-full bg-[#050E21] border border-white/10 rounded-xl px-3 py-1.5 text-xs" />
+            <button type="submit" className="text-xs text-[#E8CC7A]">Search</button>
+          </form>
           {/* Quick Search across folders */}
           <div className="relative">
             <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/40" />
@@ -246,7 +254,7 @@ export default function FolderExplorerView({
           <div className="flex items-center gap-2">
             <Folder size={14} className="text-emerald-400" />
             <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-300">
-              3. Custom Campaign & Staff Folders
+              3. Custom Folders
             </h3>
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/[0.06] text-white/50 font-medium">
               {customFolders.length} Folders
@@ -267,11 +275,11 @@ export default function FolderExplorerView({
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {filteredCustomFolders.map((folder) => (
-            <Link
+            <div
               key={folder.id}
-              href={`/admin?folder=${folder.id}`}
               className="group p-4 rounded-3xl bg-[#071228] border border-white/[0.08] hover:border-emerald-500/50 hover:bg-emerald-500/[0.03] transition-all shadow-lg hover:shadow-2xl flex flex-col justify-between"
             >
+              <Link href={`/admin?folder=${folder.id}`} className="flex flex-1 flex-col justify-between">
               <div>
                 <div className="flex items-center justify-between mb-3">
                   <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400">
@@ -301,7 +309,13 @@ export default function FolderExplorerView({
                   <ArrowRight size={12} />
                 </span>
               </div>
-            </Link>
+              </Link>
+              {canDelete && (
+                <div className="mt-3 flex justify-end">
+                  <DeleteLeadListButton id={folder.id} name={folder.name} kind="folder" returnTo="/admin" />
+                </div>
+              )}
+            </div>
           ))}
 
           {/* Quick "+ New Folder" Action Tile */}

@@ -2,6 +2,7 @@
 
 import { useState, useTransition, useMemo, useRef, useEffect } from "react";
 import Link from "next/link";
+import { matchesLeadSearch } from "@/lib/lead-search-shared";
 import { ArrowLeft, Check, Edit, Plus, Trash2, UploadCloud, RotateCcw, CheckCircle2, MapPin, PhoneCall } from "lucide-react";
 import AdminBackButton from "@/components/AdminBackButton";
 import { useHighlightedLead, markLeadViewed } from "@/lib/useHighlightedLead";
@@ -55,14 +56,22 @@ export default function LeadListDetailClient({
   adminUsers = [],
   isSuperAdmin,
   leadStatuses,
+  canManage = false,
 }: {
   list: LeadListRow;
   initialLeads: LeadForList[];
   adminUsers?: { id: string; email: string; name: string }[];
   isSuperAdmin: boolean;
   leadStatuses?: CustomLeadStatus[];
+  canManage?: boolean;
 }) {
   const [leads, setLeads] = useState<LeadForList[]>(initialLeads);
+  const [previousInitialLeads, setPreviousInitialLeads] = useState(initialLeads);
+  if (previousInitialLeads !== initialLeads) {
+    setPreviousInitialLeads(initialLeads);
+    setLeads(initialLeads);
+  }
+  const [filterQuery, setFilterQuery] = useState("");
   const highlightedLeadId = useHighlightedLead();
   const [recycleModalOpen, setRecycleModalOpen] = useState(false);
   const [bannerMessage, setBannerMessage] = useState<string | null>(null);
@@ -122,11 +131,12 @@ export default function LeadListDetailClient({
   // Filter leads by status + service
   const filteredLeads = useMemo(() => {
     return leads.filter((l) => {
+      if (!matchesLeadSearch(l, filterQuery)) return false;
       if (statusFilter !== "all" && l.status !== statusFilter) return false;
       if (serviceFilter !== "all" && l.service !== serviceFilter) return false;
       return true;
     });
-  }, [leads, statusFilter, serviceFilter]);
+  }, [leads, statusFilter, serviceFilter, filterQuery]);
 
   const totalPages = useMemo(() => {
     if (pageSize === "all") return 1;
@@ -161,7 +171,7 @@ export default function LeadListDetailClient({
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [statusFilter, serviceFilter]);
+  }, [statusFilter, serviceFilter, filterQuery]);
 
   useEffect(() => {
     // Announce selection mode changes
@@ -402,13 +412,13 @@ export default function LeadListDetailClient({
             </button>
           )}
 
-          <Link
+          {canManage && <Link
             href={`/admin/upload?listId=${list.id}`}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-[#C9A84C]/15 border border-[#C9A84C]/30 text-[#E8CC7A] hover:bg-[#C9A84C]/25 transition-all"
           >
             <UploadCloud size={14} /> Upload Leads
-          </Link>
-          {isSuperAdmin && (
+          </Link>}
+          {canManage && (
             <Link
               href={`/admin/lists/${list.id}/edit`}
               className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold border border-white/15 text-white/80 hover:text-white hover:border-white/30"
@@ -526,9 +536,12 @@ export default function LeadListDetailClient({
         )}
       </div>
 
+      <input type="search" aria-label="Search this list" placeholder="Search this list by name, phone, car, area…"
+        value={filterQuery} onChange={(event) => setFilterQuery(event.target.value)}
+        className="mb-4 w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm" />
       {error && <p className="mb-4 text-[12px] text-red-300">{error}</p>}
 
-      <div className="mb-6">
+      {canManage && <div className="mb-6">
         <h2 className="text-[11px] font-bold text-[#C9A84C] uppercase tracking-widest mb-2">
           Add Leads to This List
         </h2>
@@ -636,7 +649,7 @@ export default function LeadListDetailClient({
             </div>
           )}
         </div>
-      </div>
+      </div>}
 
       {filteredLeads.length === 0 ? (
         <div className="text-center py-12 text-white/40">
@@ -774,6 +787,8 @@ export default function LeadListDetailClient({
                       Status:
                     </span>
                     <LeadStatusControl
+                        canManage={canManage}
+                        onSaved={(status) => setLeads((rows) => rows.map((row) => row.id === lead.id ? { ...row, status } : row))}
                       id={lead.id}
                       status={lead.status}
                       color={statusColorMap[lead.status] || "#C9A84C"}
@@ -798,7 +813,7 @@ export default function LeadListDetailClient({
                 {colPrefs.isVisible("service") && <th className="px-3 py-2 text-left font-semibold">Service</th>}
                 {colPrefs.isVisible("vehicle") && <th className="px-3 py-2 text-left font-semibold">Vehicle</th>}
                 {colPrefs.isVisible("status") && <th className="px-3 py-2 text-left font-semibold">Status</th>}
-                {colPrefs.isVisible("actions") && <th className="px-3 py-2 text-center font-semibold">Actions</th>}
+                {canManage && colPrefs.isVisible("actions") && <th className="px-3 py-2 text-center font-semibold">Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -874,6 +889,8 @@ export default function LeadListDetailClient({
                   {colPrefs.isVisible("status") && (
                     <td className="px-3 py-2">
                       <LeadStatusControl
+                        canManage={canManage}
+                        onSaved={(status) => setLeads((rows) => rows.map((row) => row.id === lead.id ? { ...row, status } : row))}
                         id={lead.id}
                         status={lead.status}
                         color={statusColorMap[lead.status] || "#C9A84C"}
@@ -882,7 +899,7 @@ export default function LeadListDetailClient({
                     </td>
                   )}
 
-                  {colPrefs.isVisible("actions") && (
+                  {canManage && colPrefs.isVisible("actions") && (
                     <td className="px-3 py-2 text-center">
                       <button
                         type="button"

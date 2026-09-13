@@ -8,7 +8,7 @@ vi.mock("@/lib/supabase", () => ({
     from: vi.fn().mockReturnThis(),
     select: vi.fn().mockReturnThis(),
     eq: vi.fn().mockReturnThis(),
-    order: vi.fn().mockResolvedValue({ data: [], error: null }),
+    order: vi.fn().mockReturnThis(),
     range: vi.fn().mockResolvedValue({ data: [], error: null }),
   }),
 }));
@@ -33,6 +33,7 @@ describe("Analytics & Badge Metrics Number Consistency", () => {
         {
           id: "web-1",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "wizard",
@@ -43,6 +44,7 @@ describe("Analytics & Badge Metrics Number Consistency", () => {
         {
           id: "web-2",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "wizard",
@@ -53,6 +55,7 @@ describe("Analytics & Badge Metrics Number Consistency", () => {
         {
           id: "web-3",
           primaryLocality: "Adyar",
+          pincode: null,
           area: "Adyar",
           year: "2026",
           source: "wizard",
@@ -65,6 +68,7 @@ describe("Analytics & Badge Metrics Number Consistency", () => {
         {
           id: "hot-1",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "admin",
@@ -76,6 +80,7 @@ describe("Analytics & Badge Metrics Number Consistency", () => {
         {
           id: "hot-2",
           primaryLocality: "Anna Nagar",
+          pincode: null,
           area: "Anna Nagar",
           year: "2026",
           source: "manual",
@@ -89,6 +94,7 @@ describe("Analytics & Badge Metrics Number Consistency", () => {
         {
           id: "upload-2026-1",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "upload",
@@ -100,6 +106,7 @@ describe("Analytics & Badge Metrics Number Consistency", () => {
         {
           id: "upload-2026-2",
           primaryLocality: "Madipakkam",
+          pincode: null,
           area: "Madipakkam",
           year: "2026",
           source: "upload",

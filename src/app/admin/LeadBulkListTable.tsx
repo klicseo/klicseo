@@ -551,12 +551,12 @@ export default function LeadBulkListTable({
               onChange={(e) => setTargetListId(e.target.value)}
               className="bg-[#050E21] border border-white/15 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#C9A84C] max-w-[220px] truncate cursor-pointer"
             >
-              <option value="">— Assign to Existing List —</option>
+              <option value="">— Choose Folder or Staff List —</option>
               {lists.map((l) => {
                 const staffName = l.assigned_admin_user?.name || l.assigned_admin_user?.email;
                 return (
                   <option key={l.id} value={l.id}>
-                    {l.name} {staffName ? `(${staffName})` : "(Unassigned)"}
+                    {l.is_custom_folder ? "Folder: " : "Staff list: "}{l.name} {staffName ? `(${staffName})` : "(Unassigned)"}
                   </option>
                 );
               })}

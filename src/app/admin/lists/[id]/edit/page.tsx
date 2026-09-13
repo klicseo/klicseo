@@ -7,6 +7,7 @@ import { updateLeadListAction } from "../../actions";
 import { listAssignableAdminUsers } from "@/lib/admin-users";
 import type { LeadListRow } from "@/lib/leadLists-shared";
 import LeadListForm from "../../LeadListForm";
+import { assertListAccess } from "@/lib/lead-access";
 import { currentAdmin } from "@/lib/admin-auth";
 
 export default async function EditLeadListPage({
@@ -16,13 +17,15 @@ export default async function EditLeadListPage({
 }) {
   const { id } = await params;
   const me = await currentAdmin();
+  if (!me?.permissions.includes("leads.manage")) notFound();
+  await assertListAccess(me, id);
 
   let list: LeadListRow | null = null;
   let employees: { id: string; name: string }[] = [];
   try {
     const [listResult, adminUsers] = await Promise.all([
       getLeadList(id),
-      listAssignableAdminUsers(),
+      me.role === "super_admin" ? listAssignableAdminUsers() : Promise.resolve([]),
     ]);
     list = listResult;
     employees = adminUsers.map((user) => ({ id: user.id, name: user.name }));
@@ -38,10 +41,6 @@ export default async function EditLeadListPage({
     redirect("/admin/lists");
   }
 
-  // Only super_admin can edit lead lists.
-  if (me?.role !== "super_admin") {
-    notFound();
-  }
 
   return (
     <AdminShell require="leads.manage">

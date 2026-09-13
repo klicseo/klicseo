@@ -297,7 +297,7 @@ export default function LeadCardsGrid({
                           Move to Folder
                         </div>
                         <div className="max-h-48 overflow-y-auto space-y-0.5">
-                          {leadLists.map((list) => {
+                          {leadLists.filter((list) => list.is_custom_folder).map((list) => {
                             const isAssigned = assignedLists.includes(list.name);
                             return (
                               <button

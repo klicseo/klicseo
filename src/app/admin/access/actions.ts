@@ -48,6 +48,10 @@ export async function grantAccessAction(
     return { error: "You can only grant access at or below your own level." };
   }
 
+  if (email === process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase()) return { error: "The owner account is managed by server configuration." };
+  const existing = await getAdminUser(email);
+  if (existing && !canManageRole(me.role, existing.role)) return { error: "Forbidden: You cannot replace this account." };
+
   const permissions = role === "staff" ? readPermissions(formData) : [];
   const employeeId = String(formData.get("employee_id") ?? "").trim() || null;
   if (role === "staff" && permissions.length === 0) {

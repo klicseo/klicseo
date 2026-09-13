@@ -1,12 +1,15 @@
 "use server";
 
+import { moveLeadsToCustomFolder, removeLeadFromCustomFolder } from "@/lib/lead-folder-items";
+import { registerLeadFolders } from "@/lib/lead-folder-registry";
+
+import { assertListAccess, assertLeadSelectionAccess, resolveListOwner } from "@/lib/lead-access";
 import { revalidatePath } from "next/cache";
 import { currentAdmin, resolveScope } from "@/lib/admin-auth";
-import { getAdminUser } from "@/lib/admin-users";
-import { insertLeadList, addLeadsToList, removeLeadFromList, getLeadList } from "@/lib/leadLists";
+import { insertLeadList, invalidateLeadListCache } from "@/lib/leadLists";
 import { assertLeadInScope } from "@/lib/leads";
 import { logAudit } from "@/lib/audit";
-import { invalidateAssignedLeadsCache, markLeadsAsAssigned } from "@/lib/lead-routing";
+import { invalidateAssignedLeadsCache } from "@/lib/lead-routing";
 
 export interface CreateFolderResult {
   ok: boolean;
@@ -29,13 +32,14 @@ export async function createFolderAction(formData: {
   }
 
   try {
-    const adminRow = me.email ? await getAdminUser(me.email) : null;
-    const assignedUserId = me.role === "staff" ? (adminRow?.id || null) : (formData.assignedAdminUserId || null);
+    const assignedUserId = await resolveListOwner(me, formData.assignedAdminUserId);
 
     const list = await insertLeadList({
       name,
+      is_custom_folder: true,
       assigned_admin_user_id: assignedUserId,
     });
+    await registerLeadFolders([list.id]);
 
     await logAudit("create", {
       entity: "lead_lists",
@@ -47,6 +51,8 @@ export async function createFolderAction(formData: {
     invalidateAssignedLeadsCache();
     revalidatePath("/admin");
     revalidatePath("/admin/lists");
+    revalidatePath("/admin/my-lists");
+    revalidatePath("/admin/lists/[id]", "page");
 
     return { ok: true, folderId: list.id };
   } catch (err: any) {
@@ -65,19 +71,11 @@ export async function moveLeadToFolderAction(
   }
 
   try {
-    const scope = (await resolveScope(me)) ?? { kind: "all" as const };
-    await assertLeadInScope(leadId, scope);
+    await assertListAccess(me, targetListId);
+    await assertLeadSelectionAccess(me, [leadId]);
 
-    // If staff, verify destination folder is also assigned to them
-    if (me.role === "staff" && scope.kind === "assigned") {
-      const targetList = await getLeadList(targetListId);
-      if (!targetList || targetList.assigned_admin_user_id !== scope.adminUserId) {
-        return { ok: false, error: "Forbidden: Cannot move lead to another staff's folder." };
-      }
-    }
-
-    await addLeadsToList(targetListId, [leadId]);
-    markLeadsAsAssigned([leadId]);
+    await moveLeadsToCustomFolder(targetListId, [leadId]);
+    invalidateLeadListCache();
 
     await logAudit("update", {
       entity: "lead_lists",
@@ -88,6 +86,8 @@ export async function moveLeadToFolderAction(
 
     revalidatePath("/admin");
     revalidatePath("/admin/lists");
+    revalidatePath("/admin/my-lists");
+    revalidatePath("/admin/lists/[id]", "page");
     return { ok: true };
   } catch (err: any) {
     console.error("moveLeadToFolderAction error:", err);
@@ -108,11 +108,15 @@ export async function removeLeadFromFolderAction(
     const scope = (await resolveScope(me)) ?? { kind: "all" as const };
     await assertLeadInScope(leadId, scope);
 
-    await removeLeadFromList(listId, leadId);
+    await assertListAccess(me, listId);
+    await removeLeadFromCustomFolder(listId, leadId);
+    invalidateLeadListCache();
     invalidateAssignedLeadsCache();
 
     revalidatePath("/admin");
     revalidatePath("/admin/lists");
+    revalidatePath("/admin/my-lists");
+    revalidatePath("/admin/lists/[id]", "page");
     return { ok: true };
   } catch (err: any) {
     console.error("removeLeadFromFolderAction error:", err);
@@ -134,8 +138,10 @@ export async function bulkMoveLeadsToFolderAction(
   }
 
   try {
-    await addLeadsToList(targetListId, leadIds);
-    markLeadsAsAssigned(leadIds);
+    await assertListAccess(me, targetListId);
+    await assertLeadSelectionAccess(me, leadIds);
+    await moveLeadsToCustomFolder(targetListId, leadIds);
+    invalidateLeadListCache();
 
     await logAudit("update", {
       entity: "lead_lists",
@@ -146,6 +152,8 @@ export async function bulkMoveLeadsToFolderAction(
 
     revalidatePath("/admin");
     revalidatePath("/admin/lists");
+    revalidatePath("/admin/my-lists");
+    revalidatePath("/admin/lists/[id]", "page");
     return { ok: true, count: leadIds.length };
   } catch (err: any) {
     console.error("bulkMoveLeadsToFolderAction error:", err);

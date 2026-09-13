@@ -1,3 +1,4 @@
+import { readAllRows } from "./db-pagination";
 import "server-only";
 import { cache } from "react";
 import { supabase } from "./supabase";
@@ -390,6 +391,7 @@ export interface LeadLocationSummary {
   area: string | null;
   pincode: string | null;
   service?: string | null;
+  service_option?: string | null;
   price_total?: number | null;
   status?: string | null;
   source?: string | null;
@@ -435,11 +437,12 @@ export async function getOrBuildLocationIndex(): Promise<LocationIndexCache> {
   inFlightLocationIndexPromise = (async () => {
     try {
       // 1. Get exact total count to fire parallel chunk requests
-      const { count } = await supabase()
+      const { count, error: countError } = await supabase()
         .from("leads")
         .select("*", { count: "exact", head: true });
 
-      const total = count || 13000;
+      if (countError) throw countError;
+      const total = count ?? 0;
       const batchSize = 1000;
       const chunkCount = Math.ceil(total / batchSize);
 
@@ -449,7 +452,7 @@ export async function getOrBuildLocationIndex(): Promise<LocationIndexCache> {
         chunkPromises.push(
           supabase()
             .from("leads")
-            .select("id, area, address, pincode, service, price_total, status, source, created_at, custom_fields")
+            .select("id, area, address, pincode, service, service_option, price_total, status, source, created_at, custom_fields")
             .range(start, start + batchSize - 1),
         );
       }
@@ -461,6 +464,7 @@ export async function getOrBuildLocationIndex(): Promise<LocationIndexCache> {
         address: string | null;
         pincode: string | null;
         service: string | null;
+        service_option?: string | null;
         price_total: number | null;
         status: string | null;
         source: string | null;
@@ -469,6 +473,7 @@ export async function getOrBuildLocationIndex(): Promise<LocationIndexCache> {
       }> = [];
 
       for (const res of chunkResults) {
+        if (res.error) throw res.error;
         if (res.data) allRows.push(...res.data);
       }
 
@@ -555,6 +560,7 @@ export async function getOrBuildLocationIndex(): Promise<LocationIndexCache> {
           area: r.area,
           pincode: r.pincode,
           service: r.service,
+          service_option: r.service_option,
           price_total: r.price_total,
           status: r.status,
           source: r.source,
@@ -640,10 +646,10 @@ export async function listAreasWithCounts(
 
   // 2. Custom List folder UUID
   if (options.folder && options.folder.match(/^[0-9a-fA-F-]{36}$/)) {
-    const { data: listItems } = await supabase()
-      .from("lead_list_items")
+    const listItems = await readAllRows(supabase()
+      .from("lead_collection_items")
       .select("lead_id")
-      .eq("list_id", options.folder);
+      .eq("list_id", options.folder).order("lead_id"));
     const listSet = new Set((listItems ?? []).map((i) => i.lead_id));
     candidateLeads = candidateLeads.filter((l) => listSet.has(l.id));
   }

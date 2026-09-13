@@ -170,3 +170,8 @@ export interface CallReminder {
   /** Detail-page URL — `/admin/<id>` for leads, `/admin/employees/<id>` for employees. */
   href: string;
 }
+
+/** A contacted outcome completes the first calling task; unanswered/custom statuses stay pending. */
+export function isCompletedLeadStatus(status: string | null | undefined): boolean {
+  return ["contacted", "booked", "cancelled", "follow_up"].includes(status ?? "new");
+}

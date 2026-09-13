@@ -16,6 +16,7 @@ export default async function EditEmployeePage({
 }) {
   const { id } = await params;
   const me = await currentAdmin();
+  if (!me?.permissions.includes("employees.manage")) notFound();
 
   let employee;
   try {
@@ -54,7 +55,7 @@ export default async function EditEmployeePage({
           submitLabel="Save changes"
           pendingLabel="Saving…"
           jobs={jobs}
-          adminUsers={adminUsers}
+          adminUsers={adminUsers.filter((user) => me.role === "super_admin" || user.email === me.email)}
         />
       </div>
     </AdminShell>

@@ -20,6 +20,7 @@ export interface LeadAllocationFilter {
   areas?: string[];
   pincodes?: string[];
   services?: string[];
+  /** Omitted or empty means all statuses; allocation preserves the current status. */
   statuses?: string[];
   min_price?: number | null;
 }
@@ -98,3 +99,10 @@ export interface RecycleLeadsResult {
   protectedCount: number;
 }
 
+
+/** Assignment availability is independent of the last call outcome. */
+export function matchesAllocationStatus(status: string | null | undefined, statuses?: string[]): boolean {
+  if (!statuses?.length) return true;
+  const normalized = (status ?? "new").trim().toLowerCase();
+  return statuses.some((value) => value.trim().toLowerCase() === normalized);
+}

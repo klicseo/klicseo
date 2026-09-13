@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveListOwner } from "@/lib/lead-access";
 import { randomUUID } from "crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -30,6 +31,7 @@ export async function setEmployeeStatusAction(formData: FormData) {
 
   await updateEmployeeStatus(id, status);
   await logAudit("employee.status", { entity: "employee", entityId: id, summary: `Set employee status → ${status}` });
+  revalidatePath("/admin/my-employees");
   revalidatePath("/admin/employees");
   revalidatePath(`/admin/employees/${id}`);
 }
@@ -41,8 +43,12 @@ export async function deleteEmployeeAction(formData: FormData) {
   }
   const id = String(formData.get("id") ?? "");
   if (!id) return;
+  const scope = await resolveScope(me);
+  if (!scope) throw new Error("No admin account found.");
+  await assertEmployeeInScope(id, scope);
   await deleteEmployee(id);
   await logAudit("employee.delete", { entity: "employee", entityId: id, summary: "Deleted employee" });
+  revalidatePath("/admin/my-employees");
   revalidatePath("/admin/employees");
   redirect("/admin/employees");
 }
@@ -106,8 +112,9 @@ function validate(name: string, phone: string): string | null {
 }
 
 export async function createEmployeeAction(_prev: { error?: string }, formData: FormData) {
-  await requirePermission("employees.manage");
+  const me = await requirePermission("employees.manage");
   const data = readCommonFields(formData);
+  data.assigned_admin_user_id = await resolveListOwner(me, data.assigned_admin_user_id);
   const err = validate(data.name, data.phone);
   if (err) return { error: err };
 
@@ -124,6 +131,7 @@ export async function createEmployeeAction(_prev: { error?: string }, formData: 
   });
 
   await logAudit("employee.create", { entity: "employee", entityId: emp.id, summary: `Added employee ${data.name}` });
+  revalidatePath("/admin/my-employees");
   revalidatePath("/admin/employees");
   redirect("/admin/employees");
 }
@@ -140,6 +148,7 @@ export async function updateEmployeeAction(_prev: { error?: string }, formData: 
   const err = validate(data.name, data.phone);
   if (err) return { error: err };
 
+  data.assigned_admin_user_id = await resolveListOwner(me, data.assigned_admin_user_id);
   const patch: EmployeeUpdate = { ...data };
 
   // Re-uploaded files replace the old path; an empty file input leaves the
@@ -162,6 +171,7 @@ export async function updateEmployeeAction(_prev: { error?: string }, formData: 
     before: before ? (before as unknown as Record<string, unknown>) : null,
     after: after ? (after as unknown as Record<string, unknown>) : null,
   });
+  revalidatePath("/admin/my-employees");
   revalidatePath("/admin/employees");
   revalidatePath(`/admin/employees/${id}`);
   redirect(`/admin/employees/${id}`);
@@ -169,13 +179,15 @@ export async function updateEmployeeAction(_prev: { error?: string }, formData: 
 
 export async function assignEmployeesAction(formData: FormData): Promise<{ error?: string }> {
   const me = await requirePermission("employees.manage");
-  if (me.role !== "super_admin" && me.role !== "admin") {
-    return { error: "Forbidden: Only administrators can assign employees." };
+  if (me.role !== "super_admin") {
+    return { error: "Forbidden: Only the super admin can reassign employees." };
   }
   const adminUserId = String(formData.get("adminUserId") ?? "").trim() || null;
   const ids = formData.getAll("employeeIds").map((v) => String(v));
   if (!adminUserId) return { error: "Choose a team member to assign to." };
   if (!ids || ids.length === 0) return { error: "Select at least one employee." };
+
+  await resolveListOwner(me, adminUserId);
 
   // Bulk update via supabase helper
   const { error } = await supabase()
@@ -187,6 +199,7 @@ export async function assignEmployeesAction(formData: FormData): Promise<{ error
   for (const id of ids) {
     await logAudit("employee.assign", { entity: "employee", entityId: id, summary: `Assigned employee to admin ${adminUserId}` });
   }
+  revalidatePath("/admin/my-employees");
   revalidatePath("/admin/employees");
   return { error: undefined };
 }
@@ -224,7 +237,8 @@ export interface BulkImportEmployeesActionResult {
 export async function bulkImportEmployeesAction(
   payload: BulkImportEmployeesPayload,
 ): Promise<BulkImportEmployeesActionResult> {
-  await requirePermission("employees.manage");
+  const me = await requirePermission("employees.manage");
+  const assignedAdminUserId = await resolveListOwner(me, payload.assignedAdminUserId);
 
   if (!payload.employees || !payload.employees.length) {
     return {
@@ -253,13 +267,13 @@ export async function bulkImportEmployeesAction(
     terms_accepted_at: null,
     reminder_call_date: null,
     resignation_date: null,
-    assigned_admin_user_id: payload.assignedAdminUserId || null,
+    assigned_admin_user_id: assignedAdminUserId,
     notes: e.notes || (payload.sourceFileName ? `Imported from ${payload.sourceFileName}` : "Bulk uploaded via spreadsheet"),
   }));
 
   const result = await bulkInsertEmployees(employeesToInsert, {
     duplicateStrategy: payload.duplicateStrategy ?? "skip",
-    assignedAdminUserId: payload.assignedAdminUserId,
+    assignedAdminUserId: assignedAdminUserId ?? undefined,
   });
 
   const summary = `Bulk imported ${result.insertedCount} employee${
@@ -277,10 +291,11 @@ export async function bulkImportEmployeesAction(
       insertedCount: result.insertedCount,
       duplicateCount: result.duplicateCount,
       fileName: payload.sourceFileName,
-      assignedAdminUserId: payload.assignedAdminUserId,
+      assignedAdminUserId: assignedAdminUserId ?? undefined,
     },
   });
 
+  revalidatePath("/admin/my-employees");
   revalidatePath("/admin/employees");
   revalidatePath("/admin/my-employees");
 

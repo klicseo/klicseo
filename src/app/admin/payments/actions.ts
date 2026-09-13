@@ -1,7 +1,8 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { currentAdmin } from "@/lib/admin-auth";
+import { assertLeadInScope } from "@/lib/leads";
+import { currentAdmin, resolveScope } from "@/lib/admin-auth";
 import { upsertPayment, listPeriodPayments, isValidPeriod, PAYMENT_METHODS, type PaymentStatus } from "@/lib/payments";
 import { setMessageTemplates, getSiteSettings } from "@/lib/site-settings";
 import { MESSAGE_TEMPLATE_DEFS, MESSAGE_TEMPLATE_DEFAULTS, type MessageTemplates } from "@/lib/site-settings-shared";
@@ -12,17 +13,20 @@ export async function savePaymentAction(
   formData: FormData,
 ): Promise<{ error?: string; ok?: string }> {
   try {
-    // payments.manage is the dedicated permission; fall back to leads.manage
-    // so existing users don't suddenly lose access until the admin re-grants.
+    // Payment editing requires both its dedicated permission and lead ownership.
     const me = await currentAdmin();
     if (!me) throw new Error("Unauthorized");
-    if (!me.permissions.includes("payments.manage") && !me.permissions.includes("leads.manage")) {
+    if (!me.permissions.includes("payments.manage")) {
       throw new Error("Forbidden");
     }
 
     const lead_id = String(formData.get("lead_id") ?? "");
     const period = String(formData.get("period") ?? "");
     if (!lead_id || !isValidPeriod(period)) return { error: "Bad request." };
+
+    const scope = await resolveScope(me);
+    if (!scope) throw new Error("No admin account found.");
+    await assertLeadInScope(lead_id, scope);
 
     const status: PaymentStatus = formData.get("status") === "paid" ? "paid" : "pending";
     const amountRaw = String(formData.get("amount") ?? "").trim();

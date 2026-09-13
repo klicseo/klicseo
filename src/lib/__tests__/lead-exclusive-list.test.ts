@@ -1,51 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-
-const mockDeleteIn = vi.fn();
-const mockInsert = vi.fn();
-
-vi.mock("@/lib/supabase", () => ({
-  supabase: () => ({
-    from: (table: string) => {
-      if (table === "lead_list_items") {
-        return {
-          delete: () => ({
-            in: (field: string, values: string[]) => {
-              mockDeleteIn(field, values);
-              return Promise.resolve({ error: null });
-            },
-          }),
-          insert: (items: unknown) => {
-            mockInsert(items);
-            return Promise.resolve({ error: null });
-          },
-        };
-      }
-      return {};
-    },
-  }),
-}));
-
+const upsert = vi.fn();
+const remove = vi.fn();
+vi.mock("@/lib/supabase", () => ({ supabase: () => ({ from: () => ({ upsert, delete: remove, select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { is_custom_folder: false }, error: null }) }) }) }) }) }));
 import { addLeadsToList } from "../leadLists";
 
-describe("Exclusive 1-to-1 lead list rule", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+describe("Exclusive staff assignment moves", () => {
+  beforeEach(() => { vi.clearAllMocks(); upsert.mockResolvedValue({ error: null }); });
+  it("moves unique leads in one atomic statement", async () => {
+    await addLeadsToList("target", ["one", "two", "one"]);
+    expect(upsert).toHaveBeenCalledWith([
+      { list_id: "target", lead_id: "one", added_at: expect.any(String) },
+      { list_id: "target", lead_id: "two", added_at: expect.any(String) },
+    ], { onConflict: "lead_id" });
+    expect(remove).not.toHaveBeenCalled();
   });
-
-  it("removes leads from any previous lists before adding to a new list", async () => {
-    const targetListId = "list-target-456";
-    const leadIds = ["lead-1", "lead-2", "lead-3"];
-
-    await addLeadsToList(targetListId, leadIds);
-
-    // 1. Must delete any existing list memberships for these leads
-    expect(mockDeleteIn).toHaveBeenCalledWith("lead_id", ["lead-1", "lead-2", "lead-3"]);
-
-    // 2. Must insert them exclusively into the target list
-    expect(mockInsert).toHaveBeenCalledWith([
-      { list_id: targetListId, lead_id: "lead-1" },
-      { list_id: targetListId, lead_id: "lead-2" },
-      { list_id: targetListId, lead_id: "lead-3" },
-    ]);
+  it("does not delete original membership when the destination write fails", async () => {
+    upsert.mockResolvedValue({ error: new Error("Invalid destination") });
+    await expect(addLeadsToList("missing", ["one"])).rejects.toThrow("Invalid destination");
+    expect(remove).not.toHaveBeenCalled();
   });
 });

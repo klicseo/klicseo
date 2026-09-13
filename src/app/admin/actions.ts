@@ -1,5 +1,9 @@
 "use server";
 
+import { after } from "next/server";
+import { DEFAULT_LEAD_STATUS_ITEMS } from "@/lib/site-settings-shared";
+import { getSiteSettings } from "@/lib/site-settings";
+import { assertListAccess, resolveListOwner } from "@/lib/lead-access";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requirePermission, currentAdmin, resolveScope } from "@/lib/admin-auth";
@@ -32,6 +36,10 @@ export async function setStatusAction(formData: FormData) {
   const scope = (await resolveScope(me)) ?? { kind: "all" as const };
   await assertLeadInScope(id, scope);
 
+  const settings = await getSiteSettings();
+  if (!(settings.leadStatuses ?? DEFAULT_LEAD_STATUS_ITEMS).some((item) => item.id === status)) throw new Error("Invalid lead status.");
+  const before = await getLead(id);
+  if (before?.status === status) return;
   await updateLeadStatus(id, status);
   await logAudit("lead.status", {
     entity: "lead",
@@ -41,7 +49,7 @@ export async function setStatusAction(formData: FormData) {
   });
   
   // Trigger Serverless Queue Auto-Refill in the background without blocking the UI response
-  void processQueueAutoRefills();
+  after(() => processQueueAutoRefills().then(() => undefined));
 
   revalidatePath("/admin");
   revalidatePath(`/admin/${id}`);
@@ -58,6 +66,9 @@ export async function deleteLeadAction(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   const returnTo = String(formData.get("returnTo") ?? "");
   if (!id) return;
+  const scope = await resolveScope(me);
+  if (!scope) throw new Error("No admin account found.");
+  await assertLeadInScope(id, scope);
   await deleteLead(id);
   await logAudit("lead.delete", { entity: "lead", entityId: id, summary: "Deleted lead" });
   revalidatePath("/admin");
@@ -145,7 +156,9 @@ export async function createLeadAction(
   _prev: { error?: string },
   formData: FormData,
 ): Promise<{ error?: string }> {
-  await requirePermission("leads.manage");
+  const me = await requirePermission("leads.manage");
+  const selectedListId = String(formData.get("list_id") ?? "").trim();
+  if (selectedListId) await assertListAccess(me, selectedListId);
   const data = readLeadFromForm(formData, await getServiceDiscounts());
 
   const lead = await insertLead({
@@ -286,17 +299,18 @@ export async function bulkImportLeadsAction(
 
   const adminRow = me.email ? await getAdminUser(me.email) : null;
   // If caller is staff, force assignedAdminUserId = adminRow.id
-  const effectiveAssignedUserId = me.role === "staff" ? (adminRow?.id || null) : (payload.assignedAdminUserId || null);
+  const effectiveAssignedUserId = await resolveListOwner(me, payload.assignedAdminUserId);
+  if (payload.targetListId) await assertListAccess(me, payload.targetListId);
 
   let finalTargetListId: string | null = payload.targetListId || null;
   let finalListName: string | null = null;
 
   // 1. Create a new lead list if requested
-  if (payload.newListName && payload.newListName.trim()) {
+  if (payload.newListName?.trim() || (!finalTargetListId && effectiveAssignedUserId)) {
     try {
       const { insertLeadList } = await import("@/lib/leadLists");
       const listRow = await insertLeadList({
-        name: payload.newListName.trim(),
+        name: payload.newListName?.trim() || `Imported Leads - ${new Date().toLocaleDateString("en-IN")}`,
         assigned_admin_user_id: effectiveAssignedUserId,
       });
       finalTargetListId = listRow.id;
@@ -358,6 +372,7 @@ export async function bulkImportLeadsAction(
   const result = await bulkInsertLeads(leadsToInsert, {
     duplicateStrategy: payload.duplicateStrategy || "skip",
     listId: finalTargetListId,
+    scope: (await resolveScope(me)) ?? undefined,
   });
 
   // 4. Audit trail

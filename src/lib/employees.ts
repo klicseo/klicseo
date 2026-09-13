@@ -1,4 +1,6 @@
 import "server-only";
+import { readAllRows } from "./db-pagination";
+import { matchesLeadSearch } from "./lead-search-shared";
 import { supabase } from "./supabase";
 import { sealFields, unsealFields, unseal, phoneHash, normalizePhone } from "./crypto";
 import type { CallReminder } from "./leads-shared";
@@ -113,27 +115,14 @@ export async function listEmployees(
   if (opts.jobRole && opts.jobRole !== "all") q = q.eq("job_role", opts.jobRole);
   if (opts.fromIso) q = q.gte("created_at", opts.fromIso);
   if (opts.toIso) q = q.lte("created_at", opts.toIso);
-  if (opts.search) {
-    const s = sanitizeSearch(opts.search);
-    if (s) {
-      const orParts = SEARCH_FIELDS.map((f) => `${f}.ilike.%${s}%`);
-      const ph = phoneHash(opts.search);
-      if (ph && normalizePhone(opts.search).length >= 7) {
-        orParts.push(`phone_hash.eq.${ph}`);
-      }
-      q = q.or(orParts.join(","));
-    }
-  }
-  q = q.limit(opts.limit ?? 200);
-  const { data, error } = await q;
-  if (error) throw error;
+  const data = await readAllRows(q.order("id"));
   return (data ?? []).map((r) => {
     const row = unsealFields(r as EmployeeRow, ENCRYPTED_EMPLOYEE_FIELDS)!;
     const assignedAdminUser = Array.isArray(row.assigned_admin_user)
       ? row.assigned_admin_user[0] ?? null
       : row.assigned_admin_user ?? null;
     return { ...row, assigned_admin_user: assignedAdminUser };
-  }) as EmployeeRow[];
+  }).filter((row) => matchesLeadSearch(row, opts.search ?? "")).slice(0, opts.limit ?? 200) as EmployeeRow[];
 }
 
 export async function getEmployee(id: string): Promise<EmployeeRow | null> {

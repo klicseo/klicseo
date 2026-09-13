@@ -68,7 +68,10 @@ forced sign-outs to live tabs within ~5 seconds.
 - **Permissions** (granular, only consulted for staff): `leads.view`,
   `leads.manage`, `employees.view`, `employees.manage`, `payments.view`,
   `payments.manage`.
-- Admins and super-admins implicitly hold every permission.
+- Admins and super-admins implicitly hold every permission. Only super-admins
+  have unrestricted row visibility; regular admins and staff use assigned scope.
+  Payments enforce that scope on reads, exports, and saves. Global allocation
+  and reassignment require the super-admin role.
 - Every server action calls `requirePermission(perm)` (or the equivalent
   role check) before mutating data.
 - Row-level security (RLS) is enabled on every table. Public-read tables
@@ -123,9 +126,8 @@ compromise can't read them without also stealing the encryption key.
 **Phone search**: encrypted phones can't be `ILIKE`'d, so we keep a sibling
 `phone_hash` column = HMAC-SHA256 of the normalised digits (last 10), keyed
 by `APP_ENCRYPTION_KEY` with a `"phone-hash-v1:"` domain tag. Searching by a
-full phone number in the admin search box continues to work; **partial phone
-search no longer works** (typing `9876` won't find leads — type the full
-number). Brute-forcing the hash space requires also stealing the encryption
+full phone number in the admin search box continues to work; lead and employee search also supports partial phones by decrypting scoped
+rows on the server before matching. Brute-forcing the hash space requires also stealing the encryption
 key, at which point the attacker can decrypt the phone directly.
 
 **Wire format**: `enc:v1:` prefix + base64( IV(12B) | tag(16B) | ciphertext ).

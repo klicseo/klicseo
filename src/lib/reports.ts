@@ -1,4 +1,6 @@
 import "server-only";
+import { readAllRows } from "./db-pagination";
+import { isCompletedLeadStatus } from "./leads-shared";
 import { supabase } from "./supabase";
 import { listAdminUsers } from "./admin-users";
 import { unsealFields, unseal, isSealed } from "./crypto";
@@ -126,16 +128,16 @@ export async function getDailyStaffReport(
 ): Promise<DailyReportSummary> {
   const today = getTodayIST();
   const isAllTime = Boolean(filter?.isAllTime || filter?.preset === "all_time");
-  let primaryDate = filter?.date || today;
-  let startDate = filter?.startDate || primaryDate;
-  let endDate = filter?.endDate || primaryDate;
+  const primaryDate = filter?.date || today;
+  const startDate = filter?.startDate || primaryDate;
+  const endDate = filter?.endDate || primaryDate;
   const isSingleDay = !isAllTime && startDate === endDate;
 
   // Compute UTC timestamp bounds for query if not all-time
   const { startUtc, endUtc } = isAllTime
     ? { startUtc: "", endUtc: "" }
     : isSingleDay
-    ? istDateToUtcRange(primaryDate)
+    ? istDateToUtcRange(startDate)
     : istRangeToUtcRange(startDate, endDate);
 
   // 1. Fetch active staff / admin users
@@ -164,7 +166,7 @@ export async function getDailyStaffReport(
     queueQuery = queueQuery.eq("lead_lists.assigned_admin_user_id", filter.assignedAdminUserId);
   }
 
-  const { data: queueItems } = await queueQuery;
+  const queueItems = await readAllRows(queueQuery.order("lead_id"));
 
   const assignedCountByStaff = new Map<string, number>();
   const pendingCountByStaff = new Map<string, number>();
@@ -211,7 +213,7 @@ export async function getDailyStaffReport(
     else if (status === "draft") breakdown.draft += 1;
     else breakdown.new += 1;
 
-    if (status === "new" || status === "draft") {
+    if (!isCompletedLeadStatus(status)) {
       pendingCountByStaff.set(adminId, (pendingCountByStaff.get(adminId) ?? 0) + 1);
     }
   }
@@ -230,11 +232,7 @@ export async function getDailyStaffReport(
     auditQuery = auditQuery.ilike("actor_email", activeStaff[0].email);
   }
 
-  const { data: logs, error: logsErr } = await auditQuery.order("created_at", { ascending: true });
-
-  if (logsErr) {
-    console.error("Failed to query audit logs for daily report:", logsErr);
-  }
+  const logs = await readAllRows(auditQuery.order("created_at", { ascending: true }).order("id"));
 
   // 4. Aggregate metrics per staff
   type MetricAccumulator = {
@@ -270,7 +268,9 @@ export async function getDailyStaffReport(
     const acc = activityByEmail.get(email)!;
 
     if (log.action === "lead.status" || log.action === "lead.update") {
-      const status = extractStatusFromAudit(log);
+      const metadata = unsealAuditMetadata(log).metadata;
+      const unchangedEdit = log.action === "lead.update" && metadata?.before?.status !== undefined && metadata.before.status === metadata?.after?.status;
+      const status = unchangedEdit ? null : extractStatusFromAudit(log);
       if (status) {
         acc.totalCalls += 1;
         if (status === "booked") acc.bookedCount += 1;
@@ -425,7 +425,7 @@ export async function getStaffTimeline(
   const { startUtc, endUtc } = isAllTime
     ? { startUtc: "", endUtc: "" }
     : isSingleDay
-    ? istDateToUtcRange(primaryDate)
+    ? istDateToUtcRange(startDate)
     : istRangeToUtcRange(startDate, endDate);
 
   let query = supabase()
@@ -437,9 +437,7 @@ export async function getStaffTimeline(
     query = query.gte("created_at", startUtc).lte("created_at", endUtc);
   }
 
-  const { data: logs, error } = await query.order("created_at", { ascending: false });
-
-  if (error) throw error;
+  const logs = await readAllRows(query.order("created_at", { ascending: false }).order("id"));
   if (!logs || logs.length === 0) return [];
 
   // Collect lead ids to fetch contextual lead info
@@ -447,7 +445,7 @@ export async function getStaffTimeline(
     new Set(logs.filter((l) => l.entity === "lead" && l.entity_id).map((l) => l.entity_id!)),
   );
 
-  let leadMap = new Map<string, LeadRow>();
+  const leadMap = new Map<string, LeadRow>();
   if (leadIds.length > 0) {
     const { data: leadsData } = await supabase()
       .from("leads")

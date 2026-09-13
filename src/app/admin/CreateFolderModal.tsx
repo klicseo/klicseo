@@ -34,18 +34,22 @@ export default function CreateFolderModal({
 
     setError(null);
     startTransition(async () => {
-      const res = await createFolderAction({
-        name: trimmed,
-        assignedAdminUserId: assignedAdminUserId || null,
-      });
+      try {
+        const res = await createFolderAction({
+          name: trimmed,
+          assignedAdminUserId: assignedAdminUserId || null,
+        });
 
-      if (res.ok && res.folderId) {
-        setFolderName("");
-        setAssignedAdminUserId("");
-        if (onSuccess) onSuccess(res.folderId, trimmed);
-        onClose();
-      } else {
-        setError(res.error || "Failed to create folder.");
+        if (res.ok && res.folderId) {
+          setFolderName("");
+          setAssignedAdminUserId("");
+          if (onSuccess) onSuccess(res.folderId, trimmed);
+          onClose();
+        } else {
+          setError(res.error || "Failed to create folder.");
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to create folder. Please try again.");
       }
     });
   };
@@ -106,7 +110,7 @@ export default function CreateFolderModal({
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-white/80 flex items-center gap-1.5">
                 <User size={13} className="text-sky-400" />
-                <span>Assign Telecaller / Owner (Optional)</span>
+                <span>Folder Owner (Optional)</span>
               </label>
               <select
                 value={assignedAdminUserId}
@@ -120,6 +124,7 @@ export default function CreateFolderModal({
                   </option>
                 ))}
               </select>
+              <p className="text-xs text-white/50">Organizes the folder. Allocate its leads separately to give staff access.</p>
             </div>
           )}
 

@@ -8,6 +8,7 @@ vi.mock("@/lib/supabase", () => ({
     from: vi.fn().mockReturnThis(),
     select: vi.fn().mockReturnThis(),
     eq: vi.fn().mockReturnThis(),
+    order: vi.fn().mockReturnThis(),
     range: vi.fn().mockResolvedValue({ data: [], error: null }),
   }),
 }));
@@ -26,6 +27,7 @@ describe("Folder-Scoped Area Counts & Strict Hot Leads Consistency", () => {
         {
           id: "lead-2026-velachery-upload",
           primaryLocality: "Velachery",
+          pincode: null,
           area: "Velachery",
           year: "2026",
           source: "upload",
@@ -34,6 +36,7 @@ describe("Folder-Scoped Area Counts & Strict Hot Leads Consistency", () => {
         {
           id: "lead-2026-puzhuthivakkam-upload",
           primaryLocality: "Puzhuthivakkam",
+          pincode: null,
           area: "Puzhuthivakkam",
           year: "2026",
           source: "upload",
@@ -42,6 +45,7 @@ describe("Folder-Scoped Area Counts & Strict Hot Leads Consistency", () => {
         {
           id: "lead-2025-madipakkam-upload",
           primaryLocality: "Madipakkam",
+          pincode: null,
           area: "Madipakkam",
           year: "2025",
           source: "upload",
@@ -50,6 +54,7 @@ describe("Folder-Scoped Area Counts & Strict Hot Leads Consistency", () => {
         {
           id: "lead-hot-admin-adyar",
           primaryLocality: "Adyar",
+          pincode: null,
           area: "Adyar",
           year: "2026",
           source: "admin",
@@ -58,6 +63,7 @@ describe("Folder-Scoped Area Counts & Strict Hot Leads Consistency", () => {
         {
           id: "lead-website-wizard-annanagar",
           primaryLocality: "Anna Nagar",
+          pincode: null,
           area: "Anna Nagar",
           year: "2026",
           source: "wizard",

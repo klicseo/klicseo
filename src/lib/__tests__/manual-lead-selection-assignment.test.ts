@@ -25,13 +25,14 @@ vi.mock("@/lib/supabase", () => ({
               };
             },
           }),
-          insert: (items: unknown) => {
-            mockInsert(items);
+          upsert: (items: any[]) => {
+            mockInsert(items.map(({ added_at, ...item }) => item));
             return Promise.resolve({ error: null });
           },
           select: () => ({
             range: vi.fn().mockResolvedValue({ data: [] }),
             eq: () => ({
+              order: () => ({ range: vi.fn().mockResolvedValue({ data: [], error: null }) }),
               range: vi.fn().mockResolvedValue({ data: [] }),
             }),
           }),
@@ -75,6 +76,7 @@ vi.mock("@/lib/supabase", () => ({
         };
       }
       return {
+        upsert: vi.fn().mockResolvedValue({ error: null }),
         select: vi.fn().mockReturnThis(),
         eq: vi.fn().mockReturnThis(),
         range: vi.fn().mockResolvedValue({ data: [] }),
@@ -135,7 +137,7 @@ describe("Manual Lead Selection & List/Staff Assignment", () => {
     await addLeadsToList(targetListId, selectedLeadIds);
 
     // Verifies 1-to-1 exclusivity: deletes from prior lists
-    expect(mockDeleteIn).toHaveBeenCalledWith("lead_id", selectedLeadIds);
+    expect(mockDeleteIn).not.toHaveBeenCalled();
 
     // Verifies insertion into target list
     expect(mockInsert).toHaveBeenCalledWith([

@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { requirePermission } from "@/lib/admin-auth";
+import { assertListAccess, assertLeadSelectionAccess, resolveListOwner } from "@/lib/lead-access";
+import { requirePermission, resolveScope } from "@/lib/admin-auth";
 import { supabase } from "@/lib/supabase";
 import {
   insertLeadList,
@@ -34,8 +35,7 @@ export async function createLeadListAction(
     return { error: "List name is required" };
   }
   const assigned_admin_user_id_raw = String(formData.get("assigned_admin_user_id") ?? "").trim() || null;
-  const adminRow = me.email ? await getAdminUser(me.email) : null;
-  const assigned_admin_user_id = me.role === "staff" ? (adminRow?.id || null) : assigned_admin_user_id_raw;
+  const assigned_admin_user_id = await resolveListOwner(me, assigned_admin_user_id_raw);
 
   if (assigned_admin_user_id && me.role !== "staff") {
     const adminUsers = await listAssignableAdminUsers();
@@ -73,7 +73,7 @@ export async function updateLeadListAction(
   _prev: { error?: string },
   formData: FormData
 ): Promise<{ error?: string; redirectTo?: string }> {
-  await requirePermission("leads.manage");
+  const me = await requirePermission("leads.manage");
 
   const listId = String(formData.get("id") ?? "");
   if (!listId) {
@@ -84,7 +84,8 @@ export async function updateLeadListAction(
   if (!name) {
     return { error: "List name is required" };
   }
-  const assigned_admin_user_id = String(formData.get("assigned_admin_user_id") ?? "").trim() || null;
+  await assertListAccess(me, listId);
+  const assigned_admin_user_id = await resolveListOwner(me, String(formData.get("assigned_admin_user_id") ?? "").trim() || null);
 
   if (assigned_admin_user_id) {
     const adminUsers = await listAssignableAdminUsers();
@@ -119,7 +120,7 @@ export async function updateLeadListAction(
  * Used when selecting leads from the leads list and adding to a list.
  */
 export async function addLeadsToListAction(formData: FormData): Promise<{ error?: string }> {
-  await requirePermission("leads.manage");
+  const me = await requirePermission("leads.manage");
 
   const listId = String(formData.get("listId") ?? "");
   if (!listId) {
@@ -132,6 +133,8 @@ export async function addLeadsToListAction(formData: FormData): Promise<{ error?
   }
 
   try {
+    await assertListAccess(me, listId);
+    await assertLeadSelectionAccess(me, leadIds as string[]);
     await addLeadsToList(listId, leadIds as string[]);
 
     // Get list name for audit log
@@ -174,8 +177,7 @@ export async function createListAndAssignLeadsAction(formData: FormData): Promis
   }
 
   const assigned_admin_user_id_raw = String(formData.get("assigned_admin_user_id") ?? "").trim() || null;
-  const adminRow = me.email ? await getAdminUser(me.email) : null;
-  const assigned_admin_user_id = me.role === "staff" ? (adminRow?.id || null) : assigned_admin_user_id_raw;
+  const assigned_admin_user_id = await resolveListOwner(me, assigned_admin_user_id_raw);
 
   if (assigned_admin_user_id && me.role !== "staff") {
     const adminUsers = await listAssignableAdminUsers();
@@ -191,6 +193,7 @@ export async function createListAndAssignLeadsAction(formData: FormData): Promis
   }
 
   try {
+    await assertLeadSelectionAccess(me, leadIds);
     const list = await insertLeadList({
       name,
       assigned_admin_user_id,
@@ -229,7 +232,7 @@ export async function createListAndAssignLeadsAction(formData: FormData): Promis
  * Remove a lead from a list action.
  */
 export async function removeLeadFromListAction(formData: FormData): Promise<{ error?: string }> {
-  await requirePermission("leads.manage");
+  const me = await requirePermission("leads.manage");
 
   const listId = String(formData.get("listId") ?? "");
   const leadId = String(formData.get("leadId") ?? "");
@@ -239,6 +242,8 @@ export async function removeLeadFromListAction(formData: FormData): Promise<{ er
   }
 
   try {
+    await assertListAccess(me, listId);
+    await assertLeadSelectionAccess(me, [leadId]);
     await removeLeadFromList(listId, leadId);
 
     // Get list name for audit log
@@ -266,8 +271,8 @@ export async function removeLeadFromListAction(formData: FormData): Promise<{ er
  */
 export async function deleteLeadListAction(formData: FormData): Promise<{ ok: boolean; error?: string }> {
   const me = await requirePermission("leads.manage");
-  if (me.role !== "super_admin" && me.role !== "admin") {
-    return { ok: false, error: "Forbidden: Only administrators can delete lead lists." };
+  if (me.role !== "super_admin") {
+    return { ok: false, error: "Forbidden: Only the super admin can delete folders or lead lists." };
   }
 
   const listId = String(formData.get("id") ?? "");
@@ -278,6 +283,7 @@ export async function deleteLeadListAction(formData: FormData): Promise<{ ok: bo
     const list = await getLeadList(listId);
     const listName = list?.name || "Unknown";
 
+    await assertListAccess(me, listId);
     await deleteLeadList(listId);
 
     await logAudit("lead_list.delete", {
@@ -286,6 +292,7 @@ export async function deleteLeadListAction(formData: FormData): Promise<{ ok: bo
       summary: `Deleted lead list "${listName}"`,
     });
 
+    revalidatePath("/admin");
     revalidatePath("/admin/lists");
     revalidatePath("/admin/my-lists");
     return { ok: true };
@@ -310,20 +317,16 @@ export async function getLeadsInListAction(
     search?: string;
   } = {}
 ): Promise<{ leads: any[]; count: number }> {
-  await requirePermission("leads.view");
+  const me = await requirePermission("leads.view");
 
   try {
-    const leads = await getLeadsInList(listId, opts);
-
-    // Get total count for pagination
-    const { count } = await supabase()
-      .from("lead_list_items")
-      .select("lead_id", { count: "exact" })
-      .eq("list_id", listId);
-
+    await assertListAccess(me, listId);
+    const scope = await resolveScope(me);
+    const leads = await getLeadsInList(listId, { status: opts.status, search: opts.search, assignedAdminUserId: scope?.kind === "assigned" ? scope.adminUserId : undefined });
+    const offset = opts.offset ?? 0;
     return {
-      leads,
-      count: count ?? 0,
+      leads: leads.slice(offset, opts.limit == null ? undefined : offset + opts.limit),
+      count: leads.length,
     };
   } catch (err) {
     console.error("Failed to get leads in list:", err);
@@ -332,13 +335,16 @@ export async function getLeadsInListAction(
 }
 
 export async function searchLeadsForListAction(search: string): Promise<any[]> {
-  await requirePermission("leads.view");
+  const me = await requirePermission("leads.view");
 
   const q = search.trim();
   if (!q) return [];
 
   try {
+    const scope = await resolveScope(me);
+    if (!scope) throw new Error("No admin account found.");
     const leads = await listLeads({
+      assignedAdminUserId: scope.kind === "assigned" ? scope.adminUserId : undefined,
       search: q,
       limit: 20,
     });

@@ -82,7 +82,8 @@ export default async function EmployeeDetailPage({
   const { id } = await params;
   const { returnTo } = (await searchParams) ?? {};
   const me = await currentAdmin();
-  if (!me) notFound();
+  if (!me?.permissions.includes("employees.view")) notFound();
+  const canManage = me.permissions.includes("employees.manage");
 
   let emp;
   try {
@@ -134,14 +135,14 @@ export default async function EmployeeDetailPage({
           label={backLabel}
         />
         <div className="flex items-center gap-3">
-          <EmployeeStatusControl id={emp.id} status={emp.status} color={STATUS_COLOR[emp.status]} />
-          <Link
+          {canManage ? <EmployeeStatusControl id={emp.id} status={emp.status} color={STATUS_COLOR[emp.status]} /> : <span>{emp.status}</span>}
+          {canManage && <Link
             href={`/admin/employees/${emp.id}/edit${returnTo ? `?returnTo=${encodeURIComponent(returnTo)}` : ""}`}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-white/15 text-white/80 hover:text-white hover:border-white/30"
           >
             <Pencil size={12} /> Edit
-          </Link>
-          <DeleteEmployeeButton id={emp.id} />
+          </Link>}
+          {canManage && me.role !== "staff" && <DeleteEmployeeButton id={emp.id} />}
         </div>
       </div>
 

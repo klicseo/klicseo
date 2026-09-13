@@ -8,12 +8,11 @@ import { currentAdmin } from "@/lib/admin-auth";
 
 export default async function NewLeadListPage() {
   const me = await currentAdmin();
-  // Only super_admin can create lead lists.
-  if (me?.role !== "super_admin") notFound();
+  if (!me?.permissions.includes("leads.manage")) notFound();
 
   let employees: { id: string; name: string }[] = [];
   try {
-    const adminUsers = await listAssignableAdminUsers();
+    const adminUsers = me.role === "super_admin" ? await listAssignableAdminUsers() : [];
     employees = adminUsers.map((user) => ({ id: user.id, name: user.name }));
   } catch (err) {
     console.warn("Failed to fetch employees for list assignment:", err);

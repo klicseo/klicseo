@@ -13,6 +13,7 @@ const mockEq = vi.fn();
 vi.mock("@/lib/supabase", () => ({
   supabase: () => ({
     from: (table: string) => {
+      if (table === "lead_lists") return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { is_custom_folder: false }, error: null }) }) }) };
       if (table === "leads") {
         return {
           insert: (data: unknown) => {
@@ -123,10 +124,11 @@ describe("bulkInsertLeads", () => {
     expect(res.total).toBe(1);
     expect(res.inserted).toBe(1);
     expect(res.skipped).toBe(0);
-    expect(mockInsert).toHaveBeenCalledWith(
+    expect(mockUpsert).toHaveBeenCalledWith(
       expect.arrayContaining([
         expect.objectContaining({ list_id: "test-list-123", lead_id: "new-lead-1" }),
       ]),
+      { onConflict: "lead_id" },
     );
   });
 });

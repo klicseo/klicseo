@@ -32,11 +32,9 @@ function rowToRow(data: Record<string, unknown>): AdminUserRow {
 }
 
 // In-memory short TTL cache across rapid requests
-const adminUserCache = new Map<string, { data: AdminUserRow | null; expires: number }>();
 let listAdminUsersCache: { data: AdminUserRow[]; expires: number } | null = null;
 
 export function invalidateAdminUsersCache(): void {
-  adminUserCache.clear();
   listAdminUsersCache = null;
 }
 
@@ -44,11 +42,7 @@ export function invalidateAdminUsersCache(): void {
 
 export const getAdminUser = cache(async (email: string): Promise<AdminUserRow | null> => {
   const norm = normalizeEmail(email);
-  const now = Date.now();
-  const cached = adminUserCache.get(norm);
-  if (cached && cached.expires > now) {
-    return cached.data;
-  }
+  // Authentication state is cached only within this request by React cache().
   const { data, error } = await supabase()
     .from(TABLE)
     .select("*, employees:employee_id (name)")
@@ -56,7 +50,7 @@ export const getAdminUser = cache(async (email: string): Promise<AdminUserRow | 
     .maybeSingle();
   if (error) throw error;
   const res = data ? rowToRow(data) : null;
-  adminUserCache.set(norm, { data: res, expires: now + 30_000 });
+
   return res;
 });
 

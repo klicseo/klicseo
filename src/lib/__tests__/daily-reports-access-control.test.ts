@@ -19,7 +19,8 @@ vi.mock("@/lib/supabase", () => ({
     in: mockIn.mockReturnThis(),
     gte: mockGte.mockReturnThis(),
     lte: mockLte.mockReturnThis(),
-    order: mockOrder.mockResolvedValue({ data: [], error: null }),
+    order: mockOrder.mockReturnThis(),
+    range: vi.fn(async () => ({ data: [], error: null })),
   }),
 }));
 
@@ -75,7 +76,7 @@ describe("Daily Reports Staff Access Control", () => {
     mockIn.mockReturnThis();
     mockGte.mockReturnThis();
     mockLte.mockReturnThis();
-    mockOrder.mockResolvedValue({ data: [], error: null });
+    mockOrder.mockReturnThis();
   });
 
   it("getDailyStaffReport returns only single staff stats when assignedAdminUserId is provided", async () => {

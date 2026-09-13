@@ -13,10 +13,14 @@ const mockGte = vi.fn();
 let mockSchedulesData: any[] = [];
 let mockLeadsData: any[] = [];
 let mockLeadListItemsData: any[] = [];
+let mockFolderItemsData: any[] = [];
 let mockAdminUsersData: any[] = [];
 let mockLeadListsData: any[] = [];
 
 let mockAllocationsLogData: any[] = [];
+let allocationLogError: Error | null = null;
+let scheduleInsertError: Error | null = null;
+let scheduleUpdateError: Error | null = null;
 
 vi.mock("@/lib/supabase", () => ({
   supabase: () => ({
@@ -54,23 +58,31 @@ vi.mock("@/lib/supabase", () => ({
             mockInsert(payload);
             const row = Array.isArray(payload) ? payload[0] : payload;
             const newRow = { id: `sched-${Date.now()}`, ...row };
-            mockSchedulesData.push(newRow);
+            if (!scheduleInsertError) mockSchedulesData.push(newRow);
             return {
               select: () => ({
-                single: () => Promise.resolve({ data: newRow, error: null }),
+                single: () => Promise.resolve({ data: scheduleInsertError ? null : newRow, error: scheduleInsertError }),
               }),
-              then: (resolve: any) => resolve({ data: newRow, error: null }),
+              then: (resolve: any) => resolve({ data: scheduleInsertError ? null : newRow, error: scheduleInsertError }),
             };
           },
-          update: (patch: any) => ({
-            eq: (field: string, val: any) => {
-              mockUpdate(patch, field, val);
-              mockSchedulesData = mockSchedulesData.map((s) =>
-                s[field] === val ? { ...s, ...patch } : s,
-              );
-              return Promise.resolve({ error: null });
-            },
-          }),
+          update: (patch: any) => {
+            const checks: Array<(row: any) => boolean> = [];
+            const apply = () => {
+              if (scheduleUpdateError) return { data: null, error: scheduleUpdateError };
+              const matched = mockSchedulesData.filter((row) => checks.every((check) => check(row)));
+              mockUpdate(patch, "id", matched.map((row) => row.id));
+              mockSchedulesData = mockSchedulesData.map((row) => matched.includes(row) ? { ...row, ...patch } : row);
+              return { data: matched.map((row) => ({ ...row, ...patch })), error: null };
+            };
+            const query: any = {
+              eq: (field: string, value: any) => { checks.push((row) => row[field] === value); return query; },
+              is: (field: string, value: any) => { checks.push((row) => (row[field] ?? null) === value); return query; },
+              select: () => Promise.resolve(apply()),
+              then: (resolve: any) => Promise.resolve(apply()).then(resolve),
+            };
+            return query;
+          },
           delete: () => ({
             eq: (field: string, val: any) => {
               mockDelete(field, val);
@@ -94,7 +106,7 @@ vi.mock("@/lib/supabase", () => ({
         };
 
         return {
-          select: (cols?: string) => leadChain,
+          select: (cols?: string, options?: { head?: boolean }) => options?.head ? Promise.resolve({ count: mockLeadsData.length, error: null }) : leadChain,
           update: (patch: any) => ({
             in: (field: string, vals: string[]) => {
               mockUpdate(patch, field, vals);
@@ -107,10 +119,17 @@ vi.mock("@/lib/supabase", () => ({
         };
       }
 
+      if (table === "lead_folder_items") return {
+        select: () => ({ eq: (field: string, value: string) => ({ order: () => ({
+          range: async (from: number, to: number) => ({ data: mockFolderItemsData.filter((row) => row[field] === value).slice(from, to + 1), error: null }),
+        }) }) }),
+      };
       if (table === "lead_list_items") {
         return {
           select: (cols?: string) => ({
+            order: () => ({ range: (from: number, to: number) => Promise.resolve({ data: mockLeadListItemsData.slice(from, to + 1), error: null }) }),
             eq: (field: string, val: any) => ({
+              order: () => ({ range: (from: number, to: number) => Promise.resolve({ data: mockLeadListItemsData.filter((item) => item[field] === val).slice(from, to + 1), error: null }) }),
               range: () => {
                 const filtered = mockLeadListItemsData.filter((item) => item[field] === val);
                 return Promise.resolve({ data: filtered, error: null });
@@ -121,6 +140,7 @@ vi.mock("@/lib/supabase", () => ({
               },
             }),
             in: (field: string, vals: string[]) => ({
+              order: () => ({ range: (from: number, to: number) => Promise.resolve({ data: mockLeadListItemsData.filter((item) => vals.includes(item[field])).slice(from, to + 1), error: null }) }),
               range: () => {
                 const filtered = mockLeadListItemsData.filter((item) => vals.includes(item[field]));
                 return Promise.resolve({ data: filtered, error: null });
@@ -133,10 +153,14 @@ vi.mock("@/lib/supabase", () => ({
             range: () => Promise.resolve({ data: mockLeadListItemsData, error: null }),
             then: (resolve: any) => resolve({ data: mockLeadListItemsData, error: null }),
           }),
-          insert: (items: any) => {
+          upsert: (items: any, options?: { ignoreDuplicates?: boolean }) => {
             const arr = Array.isArray(items) ? items : [items];
-            mockLeadListItemsData.push(...arr);
-            return Promise.resolve({ error: null });
+            const inserted = options?.ignoreDuplicates ? arr.filter((item) => !mockLeadListItemsData.some((existing) => existing.lead_id === item.lead_id)) : arr;
+            mockLeadListItemsData.push(...inserted);
+            return {
+              select: () => Promise.resolve({ data: inserted, error: null }),
+              then: (resolve: any) => Promise.resolve({ error: null }).then(resolve),
+            };
           },
           delete: () => ({
             in: (field: string, vals: string[]) => {
@@ -160,9 +184,13 @@ vi.mock("@/lib/supabase", () => ({
       if (table === "lead_lists") {
         return {
           select: () => ({
+            order: () => ({ range: () => Promise.resolve({ data: mockLeadListItemsData, error: null }) }),
             eq: (field: string, val: any) => {
               const filtered = mockLeadListsData.filter((l) => l[field] === val);
-              return Promise.resolve({ data: filtered, error: null });
+              return {
+                maybeSingle: () => Promise.resolve({ data: filtered[0] ?? null, error: null }),
+                then: (resolve: any) => Promise.resolve({ data: filtered, error: null }).then(resolve),
+              };
             },
             then: (resolve: any) => resolve({ data: mockLeadListsData, error: null }),
           }),
@@ -172,7 +200,7 @@ vi.mock("@/lib/supabase", () => ({
             mockLeadListsData.push(newRow);
             return {
               select: () => ({
-                single: () => Promise.resolve({ data: newRow, error: null }),
+                single: () => Promise.resolve({ data: scheduleInsertError ? null : newRow, error: scheduleInsertError }),
               }),
             };
           },
@@ -210,6 +238,7 @@ vi.mock("@/lib/supabase", () => ({
             }),
           }),
           insert: (log: any) => {
+            if (allocationLogError) return Promise.resolve({ error: allocationLogError });
             mockInsert(log);
             const arr = Array.isArray(log) ? log : [log];
             mockAllocationsLogData.push(...arr);
@@ -228,14 +257,17 @@ vi.mock("@/lib/admin-auth", () => ({
 }));
 
 vi.mock("@/lib/admin-users", () => ({
+  listAssignableAdminUsers: async () => mockAdminUsersData.filter((user) => user.status !== "inactive"),
   getAdminUser: (email: string) => Promise.resolve({ id: "admin-123", email, role: "super_admin" }),
 }));
 
 import {
   matchesFilter,
+  countMatchingLeads,
   executeLeadAllocation,
   createAllocationSchedule,
   processScheduledJobs,
+  resumeScheduledAllocation,
   processQueueAutoRefills,
   transferStaffLeads,
   recycleAndReassignLeads,
@@ -247,9 +279,14 @@ import { invalidateAreaCountsCache } from "../area";
 
 describe("Allocation Automations Full Test Suite", () => {
   beforeEach(() => {
+    mockFolderItemsData = [];
     vi.clearAllMocks();
     invalidateAreaCountsCache();
     invalidateAssignedLeadsCache();
+    allocationLogError = null;
+    scheduleInsertError = null;
+    scheduleUpdateError = null;
+    mockAllocationsLogData = [];
     mockSchedulesData = [];
     mockLeadListItemsData = [];
     mockLeadListsData = [];
@@ -263,6 +300,204 @@ describe("Allocation Automations Full Test Suite", () => {
       { id: "lead-3", area: "OMR", pincode: "600096", service: "PPF", price_total: 15000, status: "new" },
       { id: "lead-4", area: "OMR", pincode: "600096", service: "PPF", price_total: 12000, status: "new" },
     ];
+  });
+
+  it("does not assign an initial refill batch when its schedule cannot be saved", async () => {
+    scheduleInsertError = new Error("Schedule storage unavailable");
+    await expect(createAllocationSchedule({ schedule_mode: "queue_replenish", lead_count: 2, conditions: {}, assignee_ids: ["staff-1"] })).rejects.toThrow("Schedule storage unavailable");
+    expect(mockLeadListItemsData).toEqual([]);
+    expect(mockLeadListsData).toEqual([]);
+    expect(mockSchedulesData).toEqual([]);
+  });
+
+  it("preserves the initial batch and warns when refill activation cannot be confirmed", async () => {
+    scheduleUpdateError = new Error("Activation unavailable");
+    const result = await createAllocationSchedule({ schedule_mode: "queue_replenish", lead_count: 2, conditions: {}, assignee_ids: ["staff-1"] });
+    expect(result.allocatedCount).toBe(2);
+    expect(result.warnings?.join(" ")).toContain("Do not repeat the allocation");
+    expect(mockLeadListItemsData).toHaveLength(2);
+    expect(mockSchedulesData[0].status).toBe("paused");
+  });
+
+  it("normally allocates unassigned leads of every status without changing their outcomes", async () => {
+    const statuses = ["follow_up", "call_not_responded", "contacted", "cancelled", "not_interested", "booked", "new", "draft"];
+    mockLeadsData = statuses.map((status, i) => ({ id: `status-${i}`, status, area: "Adyar" }));
+    mockLeadListItemsData = [{ lead_id: "status-6", list_id: "already-assigned" }];
+    expect((await countMatchingLeads({})).count).toBe(7);
+    expect((await countMatchingLeads({ statuses: [] })).count).toBe(7);
+    const before = mockLeadsData.map((lead) => lead.status);
+    const result = await executeLeadAllocation({ lead_count: 20, conditions: {}, assignee_ids: ["staff-1"] });
+    expect(result.allocatedCount).toBe(7);
+    expect(result.leadIds).not.toContain("status-6");
+    expect(mockLeadsData.map((lead) => lead.status)).toEqual(before);
+    expect((await countMatchingLeads({})).count).toBe(0);
+  });
+
+  it("honors an explicit status selection equally in preview and allocation", async () => {
+    mockLeadsData[0].status = "follow_up";
+    mockLeadsData[1].status = "call_not_responded";
+    const conditions = { statuses: ["follow_up", "call_not_responded"] };
+    expect((await countMatchingLeads(conditions)).count).toBe(2);
+    const result = await executeLeadAllocation({ lead_count: 20, conditions, assignee_ids: ["staff-1"] });
+    expect(result.leadIds).toEqual(["lead-1", "lead-2"]);
+    expect(mockLeadsData.slice(0, 2).map((lead) => lead.status)).toEqual(conditions.statuses);
+  });
+
+  it("uses the same source and unassigned pool for preview and existing-list allocation", async () => {
+    mockLeadsData = mockLeadsData.map((lead, i) => ({ ...lead, source: i < 2 ? "wizard" : "admin" }));
+    mockLeadListItemsData = [{ list_id: "another-staff-list", lead_id: "lead-1" }];
+    mockLeadListsData = [{ id: "destination", assigned_admin_user_id: null }];
+    const preview = await countMatchingLeads({ source: "wizard" });
+    expect(preview).toEqual({ count: 1, totalUnallocated: 1 });
+    const result = await executeLeadAllocation({ lead_count: 10, conditions: { source: "wizard" }, assignee_ids: [], target_list_id: "destination" });
+    expect(result.leadIds).toEqual(["lead-2"]);
+    expect(mockLeadListItemsData.find((item) => item.lead_id === "lead-1")?.list_id).toBe("another-staff-list");
+  });
+
+  it("honors a year filter inside the master folder in preview and execution", async () => {
+    mockLeadsData = mockLeadsData.map((lead, i) => ({ ...lead, source: "upload", created_at: i === 0 ? "2024-01-01T00:00:00Z" : "2025-01-01T00:00:00Z" }));
+    const conditions = { folder: "all_master", year: "2024" };
+    expect((await countMatchingLeads(conditions)).count).toBe(1);
+    const result = await executeLeadAllocation({ lead_count: 10, conditions, assignee_ids: ["staff-1"] });
+    expect(result.leadIds).toEqual(["lead-1"]);
+  });
+
+  it("allocates only available leads from a custom folder and keeps its complete contents", async () => {
+    const folder = "00000000-0000-0000-0000-000000000001";
+    mockFolderItemsData = ["lead-1", "lead-2", "lead-3"].map((lead_id) => ({ list_id: folder, lead_id }));
+    mockLeadListItemsData = [{ list_id: "old-staff-list", lead_id: "lead-1" }];
+    mockLeadsData[2].status = "booked";
+    expect(await countMatchingLeads({ folder })).toEqual({ count: 2, totalUnallocated: 2 });
+    const result = await executeLeadAllocation({ lead_count: 10, conditions: { folder }, assignee_ids: ["staff-1"] });
+    expect(result.leadIds).toEqual(["lead-2", "lead-3"]);
+    expect(mockFolderItemsData.map((item) => item.lead_id)).toEqual(["lead-1", "lead-2", "lead-3"]);
+    expect(mockLeadListItemsData.find((item) => item.lead_id === "lead-1")?.list_id).toBe("old-staff-list");
+    expect((await countMatchingLeads({ folder })).count).toBe(0);
+  });
+
+  it("refuses a custom folder as an assignment destination", async () => {
+    mockLeadListsData = [{ id: "folder", is_custom_folder: true, assigned_admin_user_id: "staff-1" }];
+    await expect(executeLeadAllocation({ lead_count: 1, conditions: {}, assignee_ids: [], target_list_id: "folder" })).rejects.toThrow("staff assignment list");
+    expect(mockLeadListItemsData).toEqual([]);
+  });
+
+  it("does not broaden a custom folder allocation to the global pool", async () => {
+    const conditions = { folder: "custom-folder" };
+    expect((await countMatchingLeads(conditions)).count).toBe(0);
+    const result = await executeLeadAllocation({ lead_count: 10, conditions, assignee_ids: ["staff-1"] });
+    expect(result.allocatedCount).toBe(0);
+    expect(mockLeadListItemsData).toEqual([]);
+  });
+
+  it("concurrent allocations never steal leads and retry candidates claimed by another request", async () => {
+    mockLeadListsData = [{ id: "list-a", assigned_admin_user_id: null }, { id: "list-b", assigned_admin_user_id: null }];
+    const results = await Promise.all([
+      executeLeadAllocation({ lead_count: 2, conditions: {}, assignee_ids: [], target_list_id: "list-a" }),
+      executeLeadAllocation({ lead_count: 2, conditions: {}, assignee_ids: [], target_list_id: "list-b" }),
+    ]);
+    expect(results.map((result) => result.allocatedCount)).toEqual([2, 2]);
+    expect(new Set(results.flatMap((result) => result.leadIds)).size).toBe(4);
+    expect(mockLeadListItemsData.filter((item) => item.list_id === "list-a")).toHaveLength(2);
+    expect(mockLeadListItemsData.filter((item) => item.list_id === "list-b")).toHaveLength(2);
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity])("rejects invalid lead counts (%s) before any assignment", async (lead_count) => {
+    await expect(executeLeadAllocation({ lead_count, conditions: {}, assignee_ids: ["staff-1"] })).rejects.toThrow("whole number");
+    expect(mockLeadListItemsData).toEqual([]);
+    expect(mockLeadListsData).toEqual([]);
+  });
+
+  it("rejects a missing destination and deduplicates staff selections", async () => {
+    await expect(executeLeadAllocation({ lead_count: 2, conditions: {}, assignee_ids: [] })).rejects.toThrow("destination");
+    await executeLeadAllocation({ lead_count: 4, conditions: {}, assignee_ids: ["staff-1", "staff-1", "staff-2"] });
+    expect(mockLeadListsData).toHaveLength(2);
+    for (const list of mockLeadListsData) expect(mockLeadListItemsData.filter((item) => item.list_id === list.id)).toHaveLength(2);
+  });
+
+  it("refills an existing destination list even when no separate staff are selected", async () => {
+    mockLeadListsData = [{ id: "queue-list", name: "Queue", assigned_admin_user_id: null }];
+    mockSchedulesData = [{ id: "queue-rule", status: "active_recurring", schedule_mode: "queue_replenish", target_list_id: "queue-list", assignee_ids: [], lead_count: 2, replenish_threshold: 0 }];
+    const first = await processQueueAutoRefills();
+    expect(first.refilledStaffCount).toBe(1);
+    expect(mockLeadListItemsData).toHaveLength(2);
+    expect(mockSchedulesData[0].allocated_lead_ids).toHaveLength(2);
+    expect((await processQueueAutoRefills()).refilledStaffCount).toBe(0);
+    expect(mockLeadListItemsData).toHaveLength(2);
+  });
+
+  it("uses one total refill batch across eligible staff and does not run overlapping rules against stale workloads", async () => {
+    mockSchedulesData = ["rule-a", "rule-b"].map((id) => ({ id, status: "active_recurring", schedule_mode: "queue_replenish", assignee_ids: ["staff-1", "staff-2"], lead_count: 2, replenish_threshold: 0 }));
+    expect((await processQueueAutoRefills()).refilledStaffCount).toBe(2);
+    expect(mockLeadListItemsData).toHaveLength(2);
+    expect(mockLeadListsData).toHaveLength(2);
+    expect(mockSchedulesData[1].last_run_at).toBeUndefined();
+  });
+
+  it("refuses malformed scheduled requests before any allocation or schedule write", async () => {
+    await expect(createAllocationSchedule({ schedule_mode: "daily_recurring", lead_count: 2, assignee_ids: ["staff-1"], conditions: {}, recurring_time: "25:61" })).rejects.toThrow("recurring time");
+    await expect(createAllocationSchedule({ schedule_mode: "once_scheduled", lead_count: 2, assignee_ids: ["staff-1"], conditions: {}, scheduled_for: "not-a-date" })).rejects.toThrow("date and time");
+    await expect(createAllocationSchedule({ schedule_mode: "queue_replenish", lead_count: 2, assignee_ids: ["staff-1"], conditions: {}, replenish_threshold: -1 })).rejects.toThrow("threshold");
+    expect(mockSchedulesData).toEqual([]);
+    expect(mockLeadListItemsData).toEqual([]);
+  });
+
+  it("rejects missing destinations and inactive staff before changing leads", async () => {
+    await expect(executeLeadAllocation({ lead_count: 2, conditions: {}, assignee_ids: [], target_list_id: "deleted-list" })).rejects.toThrow("no longer exists");
+    mockAdminUsersData[0].status = "inactive";
+    await expect(executeLeadAllocation({ lead_count: 2, conditions: {}, assignee_ids: ["staff-1"] })).rejects.toThrow("active team members");
+    expect(mockLeadListItemsData).toEqual([]);
+    expect(mockLeadListsData).toEqual([]);
+  });
+
+  it("recycling validates its destination before resetting source lead status", async () => {
+    mockLeadListItemsData = [{ list_id: "source", lead_id: "lead-1", leads: { id: "lead-1", status: "contacted" } }];
+    await expect(recycleAndReassignLeads({ source_list_id: "source", target_list_id: "deleted-list", target_admin_user_ids: [], include_statuses: ["contacted"], reset_status_to_new: true })).rejects.toThrow("no longer exists");
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(mockLeadListItemsData[0].list_id).toBe("source");
+  });
+
+  it.each(["once_scheduled", "daily_recurring"])("claims a %s rule only once across concurrent scheduler runs", async (schedule_mode) => {
+    mockSchedulesData = [{ id: "shared-rule", status: schedule_mode === "once_scheduled" ? "pending" : "active_recurring", schedule_mode, scheduled_for: new Date(Date.now() - 60000).toISOString(), recurring_days: [0,1,2,3,4,5,6], recurring_time: "00:00", lead_count: 2, assignee_ids: ["staff-1"], conditions: {} }];
+    const results = await Promise.all([processScheduledJobs(), processScheduledJobs()]);
+    expect(results.reduce((sum, result) => sum + result.executedCount, 0)).toBe(1);
+    expect(mockLeadListItemsData).toHaveLength(2);
+    expect(mockLeadListsData).toHaveLength(1);
+  });
+
+  it("claims a refill rule only once when two requests see the same low workload", async () => {
+    mockSchedulesData = [{ id: "refill-rule", status: "active_recurring", schedule_mode: "queue_replenish", lead_count: 2, replenish_threshold: 0, assignee_ids: ["staff-1"], conditions: {} }];
+    const results = await Promise.all([processQueueAutoRefills(), processQueueAutoRefills()]);
+    expect(results.reduce((sum, result) => sum + result.refilledStaffCount, 0)).toBe(1);
+    expect(mockLeadListItemsData).toHaveLength(2);
+    expect(mockSchedulesData[0].status).toBe("active_recurring");
+  });
+
+  it("leaves a failed dispatch paused with a reason instead of silently retrying", async () => {
+    mockSchedulesData = [{ id: "invalid-rule", status: "pending", schedule_mode: "once_scheduled", scheduled_for: new Date(Date.now() - 60000).toISOString(), lead_count: 2, assignee_ids: ["inactive-staff"], conditions: {} }];
+    await expect(processScheduledJobs()).rejects.toThrow("active team members");
+    expect(mockSchedulesData[0].status).toBe("paused");
+    expect(mockSchedulesData[0].notes).toContain("Review existing assignments before resuming");
+    expect((await processScheduledJobs()).executedCount).toBe(0);
+    expect(mockLeadListItemsData).toEqual([]);
+  });
+
+  it("resumes a paused one-time job as pending and a recurring rule as active", async () => {
+    mockSchedulesData = [{ id: "once", status: "paused", schedule_mode: "once_scheduled" }, { id: "daily", status: "paused", schedule_mode: "daily_recurring" }];
+    await resumeScheduledAllocation("once");
+    await resumeScheduledAllocation("daily");
+    expect(mockSchedulesData[0].status).toBe("pending");
+    expect(mockSchedulesData[1].status).toBe("active_recurring");
+  });
+
+  it("records history for an existing list and warns without claiming failure after a successful assignment", async () => {
+    mockLeadListsData = [{ id: "existing", assigned_admin_user_id: null }];
+    const first = await executeLeadAllocation({ lead_count: 1, conditions: {}, assignee_ids: [], target_list_id: "existing" });
+    expect(mockAllocationsLogData[0]).toMatchObject({ lead_id: first.leadIds[0], assigned_to_list_id: "existing" });
+    allocationLogError = new Error("History unavailable");
+    const next = await executeLeadAllocation({ lead_count: 1, conditions: {}, assignee_ids: [], target_list_id: "existing" });
+    expect(next.allocatedCount).toBe(1);
+    expect(next.warnings?.[0]).toContain("Do not repeat");
+    expect(mockLeadListItemsData).toHaveLength(2);
   });
 
   describe("1. Immediate Lead Allocation (once_now)", () => {

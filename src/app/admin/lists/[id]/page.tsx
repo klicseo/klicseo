@@ -15,6 +15,8 @@ export default async function LeadListPage({
 }) {
   const { id } = await params;
   const me = await currentAdmin();
+  if (!me) redirect("/admin/login");
+  if (!me.permissions.includes("leads.view")) notFound();
 
   let list: LeadListRow | null = null;
   let leads: Awaited<ReturnType<typeof getLeadsInList>> = [];
@@ -29,14 +31,10 @@ export default async function LeadListPage({
     ]);
     list = fetchedList;
     leadStatuses = siteSettings?.leadStatuses;
-    if (!list) {
-      // Non-super-admins don't have access to /admin/lists; send them to my-lists.
-      if (me && me.role !== "super_admin") redirect("/admin/my-lists");
-      else redirect("/admin/lists");
-    }
+    if (!list) notFoundError = true;
 
     // Scope guard: non-super-admins may only view lists assigned to them.
-    if (me && me.role !== "super_admin") {
+    if (list && me && me.role !== "super_admin") {
       const scope = (await resolveScope(me)) ?? { kind: "all" as const };
       if (scope.kind === "assigned" && list.assigned_admin_user_id !== scope.adminUserId) {
         notFoundError = true;
@@ -45,9 +43,10 @@ export default async function LeadListPage({
 
     const isSuperAdmin = me?.role === "super_admin";
 
-    if (!notFoundError) {
+    const leadScope = await resolveScope(me);
+    if (list && !notFoundError) {
       const [fetchedLeads, assignableUsers] = await Promise.all([
-        getLeadsInList(id),
+        getLeadsInList(id, { assignedAdminUserId: leadScope?.kind === "assigned" ? leadScope.adminUserId : undefined }),
         isSuperAdmin ? listAssignableAdminUsers().catch(() => []) : Promise.resolve([]),
       ]);
       leads = fetchedLeads;
@@ -63,6 +62,7 @@ export default async function LeadListPage({
 
   if (notFoundError) notFound();
   if (!list) return null;
+  if (list.is_custom_folder) redirect(`/admin?folder=${encodeURIComponent(list.id)}`);
 
   return (
     <AdminShell require="leads.view">
@@ -72,6 +72,7 @@ export default async function LeadListPage({
         adminUsers={adminUsers}
         isSuperAdmin={me?.role === "super_admin"}
         leadStatuses={leadStatuses}
+        canManage={me.permissions.includes("leads.manage")}
       />
     </AdminShell>
   );

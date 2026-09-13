@@ -1,5 +1,8 @@
 "use server";
 
+import { getOrBuildLocationIndex } from "@/lib/area";
+import { getSiteSettings } from "@/lib/site-settings";
+import { DEFAULT_LEAD_STATUS_ITEMS } from "@/lib/site-settings-shared";
 import { revalidatePath } from "next/cache";
 import { requirePermission, currentAdmin } from "@/lib/admin-auth";
 import { logAudit } from "@/lib/audit";
@@ -21,10 +24,23 @@ import {
 async function requireAdminManager() {
   const me = await currentAdmin();
   if (!me) throw new Error("Unauthorized");
-  if (me.role !== "super_admin" && me.role !== "admin") {
+  if (me.role !== "super_admin") {
     throw new Error("Forbidden: Only administrators can allocate or reassign leads.");
   }
   return me;
+}
+
+export async function getAllocationFilterOptionsAction(): Promise<{
+  statuses: { id: string; label: string }[];
+  services: string[];
+}> {
+  await requireAdminManager();
+  const [settings, index] = await Promise.all([getSiteSettings(), getOrBuildLocationIndex()]);
+  const statuses = settings.leadStatuses?.length ? settings.leadStatuses : DEFAULT_LEAD_STATUS_ITEMS;
+  return {
+    statuses: statuses.map(({ id, label }) => ({ id, label })),
+    services: [...new Set(index.allLeads.map((lead) => lead.service?.trim()).filter((service): service is string => !!service))].sort((a, b) => a.localeCompare(b)),
+  };
 }
 
 /**
@@ -32,13 +48,13 @@ async function requireAdminManager() {
  */
 export async function previewMatchingLeadsAction(
   filter: LeadAllocationFilter,
-): Promise<{ count: number; totalUnallocated: number }> {
+): Promise<{ count: number; totalUnallocated: number; error?: string }> {
   try {
-    await requirePermission("leads.view");
+    await requireAdminManager();
     return await countMatchingLeads(filter);
   } catch (err) {
     console.error("previewMatchingLeadsAction error:", err);
-    return { count: 0, totalUnallocated: 0 };
+    return { count: 0, totalUnallocated: 0, error: err instanceof Error ? err.message : "Could not load the available leads." };
   }
 }
 
@@ -47,7 +63,7 @@ export async function previewMatchingLeadsAction(
  */
 export async function submitLeadAllocationAction(
   req: NewLeadAllocationRequest,
-): Promise<{ ok: boolean; allocatedCount?: number; mode?: string; error?: string }> {
+): Promise<{ ok: boolean; allocatedCount?: number; mode?: string; warnings?: string[]; error?: string }> {
   try {
     await requireAdminManager();
 
@@ -65,23 +81,31 @@ export async function submitLeadAllocationAction(
     if (res.mode === "daily_recurring") {
       summary = `Configured daily recurring schedule: ${req.lead_count} leads at ${req.recurring_time || "09:30"} IST`;
     } else if (res.mode === "queue_replenish") {
-      summary = `Configured queue auto-replenish: refill ${req.lead_count} leads when staff queue drops below ${req.replenish_threshold || 5}`;
+      summary = `Configured queue auto-replenish: refill ${req.lead_count} leads when staff queue reaches or falls below ${req.replenish_threshold ?? 5}`;
     } else if (res.mode === "once_scheduled") {
       summary = `Scheduled allocation of ${req.lead_count} leads for ${req.scheduled_for}`;
     }
 
-    await logAudit("lead_allocation.configure", {
-      entity: "lead_allocation",
-      entityId: res.id || "immediate",
-      summary,
-    });
+    const warnings = [...(res.warnings ?? [])];
+    try {
+      await logAudit("lead_allocation.configure", {
+        entity: "lead_allocation",
+        entityId: res.id || "immediate",
+        summary,
+      });
+    } catch (auditError) {
+      console.error("Allocation saved but audit logging failed", auditError);
+      warnings.push("The allocation was saved, but its audit entry could not be recorded. Do not repeat the request.");
+    }
 
+    revalidatePath("/admin");
     revalidatePath("/admin/lists");
     revalidatePath("/admin/my-lists");
     return {
       ok: true,
       allocatedCount: res.allocatedCount,
       mode: res.mode,
+      warnings,
     };
   } catch (err: unknown) {
     console.error("submitLeadAllocationAction error:", err);
