@@ -114,6 +114,8 @@ export default function LeadAllocationModal({
   }, [isOpen]);
 
   // 2. Conditions
+  const [includeAssigned, setIncludeAssigned] = useState(false);
+  const [poolBreakdown, setPoolBreakdown] = useState<{ assigned: number; unassigned: number } | null>(null);
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
 
   const [selectedAreas, setSelectedAreas] = useState<string[]>(defaultArea ? [defaultArea] : []);
@@ -128,6 +130,7 @@ export default function LeadAllocationModal({
   // Sync defaultFolder and defaultArea when modal opens
   useEffect(() => {
     if (isOpen) {
+      setIncludeAssigned(false);
       setSelectedFolder(defaultFolder || "all");
       if (defaultArea) {
         setSelectedAreas((prev) => (prev.includes(defaultArea) ? prev : [...prev, defaultArea]));
@@ -161,15 +164,17 @@ export default function LeadAllocationModal({
     const timer = setTimeout(async () => {
       try {
         const res = await previewMatchingLeadsAction({
+          include_assigned: includeAssigned,
           folder: selectedFolder !== "all" ? selectedFolder : undefined,
           statuses: selectedStatuses.length > 0 ? selectedStatuses : undefined,
           areas: selectedAreas.length > 0 ? selectedAreas : undefined,
           pincodes: selectedPincodes.length > 0 ? selectedPincodes : undefined,
           services: selectedServices.length > 0 ? selectedServices : undefined,
           min_price: minPrice ? Number(minPrice) : null,
-        });
+        }, { assignee_ids: selectedAssigneeIds, target_list_id: targetListId || null });
         if (cancelled) return;
         if (res.error) throw new Error(res.error);
+        setPoolBreakdown({ assigned: res.assignedCount ?? 0, unassigned: res.unassignedCount ?? res.count });
         setAvailableCount(res.count);
         setTotalUnallocatedPool(res.totalUnallocated);
       } catch (err) {
@@ -184,7 +189,7 @@ export default function LeadAllocationModal({
     }, 50);
 
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [isOpen, selectedFolder, selectedStatuses, selectedAreas, selectedPincodes, selectedServices, minPrice]);
+  }, [isOpen, selectedFolder, selectedStatuses, selectedAreas, selectedPincodes, selectedServices, minPrice, includeAssigned, selectedAssigneeIds, targetListId]);
 
   if (!isOpen) return null;
 
@@ -301,6 +306,7 @@ export default function LeadAllocationModal({
         schedule_mode: scheduleMode,
         lead_count: Number(leadCount),
         conditions: {
+          include_assigned: includeAssigned,
           folder: selectedFolder !== "all" ? selectedFolder : undefined,
           statuses: selectedStatuses.length > 0 ? selectedStatuses : undefined,
           areas: selectedAreas.length > 0 ? selectedAreas : undefined,
@@ -317,7 +323,7 @@ export default function LeadAllocationModal({
       });
 
       if (res.ok) {
-        const notifySuccess = (message: string) => onSuccess([message, ...(res.warnings ?? [])].join(" "));
+        const notifySuccess = (message: string) => onSuccess([message, ...(res.reassignedCount != null ? [`${res.unassignedCount ?? 0} newly assigned; ${res.reassignedCount} reassigned.`] : []), ...(res.warnings ?? [])].join(" "));
         if (res.mode === "daily_recurring") {
           notifySuccess(`Configured everyday schedule: ${leadCount} leads at ${recurringTime} IST`);
         } else if (res.mode === "queue_replenish") {
@@ -433,7 +439,7 @@ export default function LeadAllocationModal({
 
               <div className="flex items-center gap-2 text-xs bg-white/[0.03] px-3 py-1.5 rounded-xl border border-white/5">
                 <span className="text-white/40">
-                  {hasActiveFilters ? "Matching Filter Pool:" : "Total Unallocated Pool:"}
+                  {includeAssigned ? "Eligible Lead Pool:" : hasActiveFilters ? "Matching Filter Pool:" : "Total Unallocated Pool:"}
                 </span>
                 {isCounting ? (
                   <Loader2 size={12} className="animate-spin text-[#C9A84C]" />
@@ -448,7 +454,8 @@ export default function LeadAllocationModal({
                     >
                       {availableCount ?? 0} leads
                     </strong>
-                    {hasActiveFilters && totalUnallocatedPool != null && (
+                    {includeAssigned && poolBreakdown && <span className="text-white/60 text-[11px]">({poolBreakdown.unassigned} unassigned + {poolBreakdown.assigned} already assigned)</span>}
+                    {!includeAssigned && hasActiveFilters && totalUnallocatedPool != null && (
                       <span className="text-white/40 text-[11px]">
                         (out of {totalUnallocatedPool} total unallocated)
                       </span>
@@ -458,6 +465,12 @@ export default function LeadAllocationModal({
               </div>
             </div>
 
+            <label className="flex items-start gap-3 rounded-xl border border-purple-400/30 bg-purple-500/10 p-3 text-sm text-white">
+              <input type="checkbox" checked={includeAssigned} onChange={(event) => setIncludeAssigned(event.target.checked)} />
+              <span>Include already-assigned leads
+                <span className="block text-xs text-white/60 mt-1">Move matching leads from their current assignment. Their status stays unchanged. Leads already with the selected team are excluded. Recurring rules use each lead only once.</span>
+              </span>
+            </label>
             <div className="flex items-center gap-3 flex-wrap">
               <input
                 type="number"
@@ -491,7 +504,7 @@ export default function LeadAllocationModal({
               <div className="text-[11px] text-amber-300/80 bg-amber-500/10 border border-amber-500/20 px-3 py-1.5 rounded-xl flex items-center gap-1.5">
                 <AlertCircle size={13} className="shrink-0" />
                 <span>
-                  You requested {leadCount} leads, but only {availableCount} matching leads are available. All {availableCount} will be allocated.
+                  You requested {leadCount} leads, but only {availableCount} matching leads are available. Up to {availableCount} can be allocated; availability is checked again when the allocation runs.
                 </span>
               </div>
             )}
@@ -541,7 +554,7 @@ export default function LeadAllocationModal({
                 </div>
               </div>
 
-              <p className="text-[11px] text-white/50">All unassigned leads are eligible by default. Select statuses to narrow the pool; allocation keeps each lead’s current status.</p>
+              <p className="text-[11px] text-white/50">{includeAssigned ? "Matching assigned and unassigned leads are eligible." : "All unassigned leads are eligible by default."} Select statuses to narrow the pool; allocation keeps each lead’s current status.</p>
               {/* Status Option Chips */}
               <div className="flex flex-wrap gap-1.5">
                 {statusOptions.map((status) => {

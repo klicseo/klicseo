@@ -14,6 +14,7 @@ export type ScheduleStatus =
   | "active_recurring";
 
 export interface LeadAllocationFilter {
+  include_assigned?: boolean;
   folder?: string;
   year?: string;
   source?: string;
@@ -105,4 +106,11 @@ export function matchesAllocationStatus(status: string | null | undefined, statu
   if (!statuses?.length) return true;
   const normalized = (status ?? "new").trim().toLowerCase();
   return statuses.some((value) => value.trim().toLowerCase() === normalized);
+}
+
+export interface AllocationDestinationContext {
+  assignee_ids?: string[];
+  target_list_id?: string | null;
+  schedule_id?: string;
+  exclude_admin_user_ids?: string[];
 }

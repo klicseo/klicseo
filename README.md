@@ -611,3 +611,22 @@ disclosure policy). Do **not** open public issues for security bugs.
 - [`CLAUDE.md`](./CLAUDE.md) — loads AGENTS.md for the Claude Code agent.
 - [`supabase/ADMIN_AUTH_SETUP.md`](./supabase/ADMIN_AUTH_SETUP.md) — Supabase Auth + SMTP setup walkthrough.
 - [`supabase/email-templates/`](./supabase/email-templates/) — branded invite/recovery email HTML.
+
+### Global recycling during allocation
+
+The allocation modal offers **Include already-assigned leads** for immediate,
+scheduled, daily, and auto-refill allocations. It is off by default. When enabled,
+unassigned leads are used first; other matching leads transfer from their old list.
+Statuses (including Booked and custom statuses) and custom folders are preserved.
+Leads already with the target team are excluded. Each recurring rule delivers a
+lead only once, tracked in `lead_allocation_deliveries`.
+
+Apply `supabase/migrations/0044_global_allocation_recycling.sql` before deploying
+this feature. The service-role-only RPC commits lists, membership changes, history,
+and delivery tracking together. It serializes list membership writes for the
+transaction and skips candidates whose status or assignment changed after selection.
+Old schedules without `include_assigned` continue using unassigned leads only.
+
+Database integration checks can be run against an **empty disposable PostgreSQL
+database** using `psql -v ON_ERROR_STOP=1 -f supabase/tests/global-allocation-recycling.sql`.
+This script creates minimal fixture tables and must never run against application data.

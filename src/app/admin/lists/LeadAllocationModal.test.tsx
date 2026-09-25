@@ -41,9 +41,19 @@ it("uses configured custom statuses and real lead service names", async () => {
 it("defaults to all statuses and restores that default when filters are cleared", async () => {
   preview.mockResolvedValue({ count: 16, totalUnallocated: 16 });
   show();
-  await waitFor(() => expect(preview).toHaveBeenCalledWith(expect.objectContaining({ statuses: undefined })));
+  await waitFor(() => expect(preview).toHaveBeenCalledWith(expect.objectContaining({ statuses: undefined }), expect.any(Object)));
   fireEvent.click(screen.getByRole("button", { name: "+ Draft" }));
-  await waitFor(() => expect(preview).toHaveBeenLastCalledWith(expect.objectContaining({ statuses: ["draft"] })));
+  await waitFor(() => expect(preview).toHaveBeenLastCalledWith(expect.objectContaining({ statuses: ["draft"] }), expect.any(Object)));
   fireEvent.click(screen.getByRole("button", { name: "All statuses" }));
-  await waitFor(() => expect(preview).toHaveBeenLastCalledWith(expect.objectContaining({ statuses: undefined })));
+  await waitFor(() => expect(preview).toHaveBeenLastCalledWith(expect.objectContaining({ statuses: undefined }), expect.any(Object)));
+});
+
+it("opts into assigned leads and displays the eligible pool breakdown", async () => {
+  preview.mockResolvedValue({ count: 5, totalUnallocated: 2, unassignedCount: 2, assignedCount: 3 });
+  show();
+  const toggle = screen.getByRole("checkbox", { name: /Include already-assigned leads/ });
+  expect((toggle as HTMLInputElement).checked).toBe(false);
+  fireEvent.click(toggle);
+  await waitFor(() => expect(preview).toHaveBeenLastCalledWith(expect.objectContaining({ include_assigned: true }), expect.any(Object)));
+  expect(await screen.findByText(/2 unassigned \+ 3 already assigned/)).toBeTruthy();
 });

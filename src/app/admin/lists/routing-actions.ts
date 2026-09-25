@@ -17,6 +17,7 @@ import {
   recycleAndReassignLeads,
   type NewLeadAllocationRequest,
   type LeadAllocationFilter,
+  type AllocationDestinationContext,
   type RecycleLeadsRequest,
   type RecycleLeadsResult,
 } from "@/lib/lead-routing";
@@ -48,10 +49,11 @@ export async function getAllocationFilterOptionsAction(): Promise<{
  */
 export async function previewMatchingLeadsAction(
   filter: LeadAllocationFilter,
-): Promise<{ count: number; totalUnallocated: number; error?: string }> {
+  context: AllocationDestinationContext = {},
+): Promise<{ count: number; totalUnallocated: number; assignedCount?: number; unassignedCount?: number; error?: string }> {
   try {
     await requireAdminManager();
-    return await countMatchingLeads(filter);
+    return await countMatchingLeads(filter, context);
   } catch (err) {
     console.error("previewMatchingLeadsAction error:", err);
     return { count: 0, totalUnallocated: 0, error: err instanceof Error ? err.message : "Could not load the available leads." };
@@ -63,7 +65,7 @@ export async function previewMatchingLeadsAction(
  */
 export async function submitLeadAllocationAction(
   req: NewLeadAllocationRequest,
-): Promise<{ ok: boolean; allocatedCount?: number; mode?: string; warnings?: string[]; error?: string }> {
+): Promise<{ ok: boolean; allocatedCount?: number; reassignedCount?: number; unassignedCount?: number; mode?: string; warnings?: string[]; error?: string }> {
   try {
     await requireAdminManager();
 
@@ -86,6 +88,10 @@ export async function submitLeadAllocationAction(
       summary = `Scheduled allocation of ${req.lead_count} leads for ${req.scheduled_for}`;
     }
 
+    if (req.conditions.include_assigned) {
+      summary += res.reassignedCount != null ? ` (${res.unassignedCount ?? 0} newly assigned, ${res.reassignedCount} reassigned; status preserved)` : "; includes already-assigned leads, status preserved, once per rule";
+    }
+
     const warnings = [...(res.warnings ?? [])];
     try {
       await logAudit("lead_allocation.configure", {
@@ -99,11 +105,13 @@ export async function submitLeadAllocationAction(
     }
 
     revalidatePath("/admin");
-    revalidatePath("/admin/lists");
+    revalidatePath("/admin/lists", "layout");
     revalidatePath("/admin/my-lists");
     return {
       ok: true,
       allocatedCount: res.allocatedCount,
+      reassignedCount: res.reassignedCount,
+      unassignedCount: res.unassignedCount,
       mode: res.mode,
       warnings,
     };

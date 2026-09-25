@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock supabase client and dependencies
+const mockRpc = vi.fn();
 const mockSelect = vi.fn();
 const mockInsert = vi.fn();
 const mockUpdate = vi.fn();
@@ -24,6 +25,7 @@ let scheduleUpdateError: Error | null = null;
 
 vi.mock("@/lib/supabase", () => ({
   supabase: () => ({
+    rpc: mockRpc,
     from: (table: string) => {
       if (table === "lead_allocation_schedules") {
         return {
@@ -181,10 +183,12 @@ vi.mock("@/lib/supabase", () => ({
         };
       }
 
+      if (table === "lead_allocation_deliveries") return { select: () => ({ eq: () => ({ order: () => ({ range: () => Promise.resolve({ data: [], error: null }) }) }) }) };
+
       if (table === "lead_lists") {
         return {
           select: () => ({
-            order: () => ({ range: () => Promise.resolve({ data: mockLeadListItemsData, error: null }) }),
+            order: () => ({ range: () => Promise.resolve({ data: mockLeadListsData, error: null }) }),
             eq: (field: string, val: any) => {
               const filtered = mockLeadListsData.filter((l) => l[field] === val);
               return {
@@ -281,6 +285,7 @@ describe("Allocation Automations Full Test Suite", () => {
   beforeEach(() => {
     mockFolderItemsData = [];
     vi.clearAllMocks();
+    mockRpc.mockResolvedValue({ data: { leadIds: ["lead-1"], reassignedCount: 1 }, error: null });
     invalidateAreaCountsCache();
     invalidateAssignedLeadsCache();
     allocationLogError = null;
@@ -300,6 +305,23 @@ describe("Allocation Automations Full Test Suite", () => {
       { id: "lead-3", area: "OMR", pincode: "600096", service: "PPF", price_total: 15000, status: "new" },
       { id: "lead-4", area: "OMR", pincode: "600096", service: "PPF", price_total: 12000, status: "new" },
     ];
+  });
+
+  it("previews assigned candidates but excludes the destination team", async () => {
+    mockLeadListsData = [{ id: "source", assigned_admin_user_id: "staff-1" }, { id: "target", assigned_admin_user_id: "staff-2" }];
+    mockLeadListItemsData = [{ lead_id: "lead-1", list_id: "source" }, { lead_id: "lead-2", list_id: "target" }];
+    const result = await countMatchingLeads({ include_assigned: true }, { assignee_ids: ["staff-2"] });
+    expect(result).toMatchObject({ count: 3, assignedCount: 1, unassignedCount: 2 });
+    await executeLeadAllocation({ lead_count: 3, conditions: { include_assigned: true }, assignee_ids: ["staff-2"] });
+    expect(mockRpc.mock.calls[0][1].p_candidates.map((lead: any) => lead.id)).toEqual(["lead-3", "lead-4", "lead-1"]);
+  });
+
+  it.each(["once_now", "once_scheduled", "daily_recurring", "queue_replenish"] as const)("persists recycling for %s and supplies the rule ID on dispatch", async (mode) => {
+    const res = await createAllocationSchedule({ schedule_mode: mode, lead_count: 1, conditions: { include_assigned: true }, assignee_ids: ["staff-2"], scheduled_for: "2020-01-01T00:00:00Z", recurring_time: "00:00", recurring_days: [0,1,2,3,4,5,6] });
+    expect(mockSchedulesData[0].conditions.include_assigned).toBe(true);
+    if (mode === "once_scheduled" || mode === "daily_recurring") await processScheduledJobs();
+    expect(mockRpc).toHaveBeenCalledWith("allocate_with_recycling", expect.objectContaining({ p_schedule: mode === "once_now" ? null : mockSchedulesData[0].id }));
+    if (mode === "queue_replenish") expect(res.reassignedCount).toBe(1);
   });
 
   it("does not assign an initial refill batch when its schedule cannot be saved", async () => {

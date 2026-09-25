@@ -1,6 +1,7 @@
 import type { NewLeadAllocationRequest } from "./lead-routing-shared";
 
 export function validateAllocationRequest(req: NewLeadAllocationRequest): void {
+  if (req.conditions?.include_assigned != null && typeof req.conditions.include_assigned !== "boolean") throw new Error("Invalid include-assigned option.");
   if (!Number.isSafeInteger(req.lead_count) || req.lead_count <= 0) throw new Error("Lead count must be a positive whole number.");
   if (!req.target_list_id && !req.assignee_ids?.length) throw new Error("Select a destination list or at least one staff member.");
   if (!["once_now", "once_scheduled", "daily_recurring", "queue_replenish"].includes(req.schedule_mode)) throw new Error("Choose a valid allocation mode.");

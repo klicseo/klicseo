@@ -18,6 +18,7 @@ import {
   setAssignedLeadsCache,
 } from "./lead-assignments";
 import type {
+  AllocationDestinationContext,
   LeadAllocationFilter,
   LeadAllocationSchedule,
   NewLeadAllocationRequest,
@@ -119,8 +120,14 @@ export function matchesFilter(
  */
 export async function countMatchingLeads(
   filter: LeadAllocationFilter,
-): Promise<{ count: number; totalUnallocated: number }> {
+  context: AllocationDestinationContext = {},
+): Promise<{ count: number; totalUnallocated: number; unassignedCount?: number; assignedCount?: number }> {
   try {
+    if (filter.include_assigned) {
+      const [{ candidates, membership }, baseline] = await Promise.all([allocationCandidates(filter, context), countMatchingLeads({ ...filter, include_assigned: false })]);
+      const assignedCount = candidates.filter(lead => membership.has(lead.id)).length;
+      return { count: candidates.length, totalUnallocated: baseline.totalUnallocated, assignedCount, unassignedCount: candidates.length - assignedCount };
+    }
     const hasExplicitFilters = Boolean(
       (filter.folder && filter.folder !== "all") ||
       (filter.year && filter.year !== "all") ||
@@ -270,10 +277,96 @@ async function assertAllocationDestination(assigneeIds: string[], targetListId?:
   return null;
 }
 
+async function allocationCandidates(conditions: LeadAllocationFilter, context: AllocationDestinationContext = {}) {
+  const [locationIndex, globalAssignedSet, customFolderIds] = await Promise.all([
+    getOrBuildLocationIndex(),
+    getAllAssignedLeadIds({ fresh: true }),
+    allocationFolderLeadIds(conditions.folder),
+  ]);
+
+  const assignedSet = globalAssignedSet;
+
+  // 2. Select unassigned candidates; do not reset or implicitly restrict status.
+  const candidateLeads = locationIndex.allLeads.filter((lead) => {
+    if (!conditions.include_assigned && assignedSet.has(lead.id)) return false;
+    if (!matchesAllocationStatus(lead.status, conditions.statuses)) return false;
+
+    // 0.5 Folder / Year / Source filter
+    if (conditions.folder && conditions.folder !== "all") {
+      if (conditions.folder === "all_master") {
+        // Show all
+      } else if (conditions.folder.startsWith("year_")) {
+        const yr = conditions.folder.replace("year_", "");
+        if (!isYearLead(lead, yr)) return false;
+      } else if (conditions.folder === "website_form") {
+        if (!isWebsiteFormLead(lead)) return false;
+      } else if (conditions.folder === "hot_leads") {
+        if (!isHotLead(lead)) return false;
+      } else {
+        if (!customFolderIds?.has(lead.id)) return false;
+      }
+    }
+    const targetYear = conditions.folder?.startsWith("year_") ? conditions.folder.slice(5) : conditions.year;
+    if (targetYear && targetYear !== "all" && !isYearLead(lead, targetYear)) return false;
+
+    if (conditions.source && conditions.source !== "all" && lead.source !== conditions.source) return false;
+
+    // 1. Area filter (Location-scoped matching)
+    if (conditions.areas && conditions.areas.length > 0) {
+      const leadPrimary = lead.primaryLocality.toLowerCase();
+      const matched = conditions.areas.some((area) => {
+        const canonicalTarget = (CANONICAL_AREA_ALIASES[area.toLowerCase().trim()] || area.trim()).toLowerCase();
+        return leadPrimary === canonicalTarget || leadPrimary.includes(canonicalTarget);
+      });
+      if (!matched) return false;
+    }
+
+    // 2. Pincodes
+    if (conditions.pincodes && conditions.pincodes.length > 0) {
+      const leadPin = String(lead.pincode ?? "").trim();
+      const matched = conditions.pincodes.some((pin) => leadPin.includes(pin.trim()));
+      if (!matched) return false;
+    }
+
+    // 3. Services
+    if (conditions.services && conditions.services.length > 0) {
+      const leadService = String(lead.service ?? "").toLowerCase().trim();
+      if (!leadService) return false;
+      const matched = conditions.services.some((srv) =>
+        leadService.includes(srv.toLowerCase().trim()),
+      );
+      if (!matched) return false;
+    }
+
+    // 4. Min Price
+    if (conditions.min_price != null && conditions.min_price > 0) {
+      const price = lead.price_total ?? 0;
+      if (price < conditions.min_price) return false;
+    }
+
+    return true;
+  });
+
+  if (!conditions.include_assigned) return { candidates: candidateLeads, membership: new Map<string, string>() };
+  const [items, lists, used] = await Promise.all([
+    readAllRows<{lead_id: string; list_id: string}>(supabase().from("lead_list_items").select("lead_id,list_id").order("lead_id")),
+    readAllRows<{id: string; assigned_admin_user_id: string | null}>(supabase().from("lead_lists").select("id,assigned_admin_user_id").order("id")),
+    context.schedule_id ? readAllRows<{lead_id: string}>(supabase().from("lead_allocation_deliveries").select("lead_id").eq("schedule_id", context.schedule_id).order("lead_id")) : Promise.resolve([]),
+  ]);
+  const membership = new Map(items.map(item => [item.lead_id, item.list_id]));
+  const target = lists.find(list => list.id === context.target_list_id);
+  const excludedStaff = new Set(context.target_list_id ? [target?.assigned_admin_user_id].filter(Boolean) : [...(context.assignee_ids ?? []), ...(context.exclude_admin_user_ids ?? [])]);
+  const excludedLists = new Set(lists.filter(list => list.id === context.target_list_id || (list.assigned_admin_user_id && excludedStaff.has(list.assigned_admin_user_id))).map(list => list.id));
+  const usedIds = new Set(used.map(row => row.lead_id));
+  const candidates = candidateLeads.filter(lead => !usedIds.has(lead.id) && !excludedLists.has(membership.get(lead.id) ?? ""));
+  candidates.sort((a, b) => Number(membership.has(a.id)) - Number(membership.has(b.id)) || a.id.localeCompare(b.id));
+  return { candidates, membership };
+}
+
 /**
  * Execute immediate allocation of N leads matching conditions, guaranteeing no duplicate assignments.
  */
-export async function executeLeadAllocation(req: {
+export async function executeLeadAllocation(req: AllocationDestinationContext & {
   lead_count: number;
   conditions: LeadAllocationFilter;
   assignee_ids: string[];
@@ -282,6 +375,8 @@ export async function executeLeadAllocation(req: {
   allocation_type?: "manual" | "scheduled" | "daily_recurring" | "queue_replenish";
 }): Promise<{
   allocatedCount: number;
+  reassignedCount?: number;
+  unassignedCount?: number;
   leadIds: string[];
   warnings?: string[];
 }> {
@@ -294,74 +389,25 @@ export async function executeLeadAllocation(req: {
   }
   const destination = await assertAllocationDestination(assignees, req.target_list_id);
   // 1. Fetch location index and assigned lead IDs
-  const [locationIndex, globalAssignedSet, customFolderIds] = await Promise.all([
-    getOrBuildLocationIndex(),
-    getAllAssignedLeadIds({ fresh: true }),
-    allocationFolderLeadIds(req.conditions.folder),
-  ]);
-
-  const assignedSet = globalAssignedSet;
-
-  // 2. Select unassigned candidates; do not reset or implicitly restrict status.
-  const candidateLeads = locationIndex.allLeads.filter((lead) => {
-    if (assignedSet.has(lead.id)) return false;
-    if (!matchesAllocationStatus(lead.status, req.conditions.statuses)) return false;
-
-    // 0.5 Folder / Year / Source filter
-    if (req.conditions.folder && req.conditions.folder !== "all") {
-      if (req.conditions.folder === "all_master") {
-        // Show all
-      } else if (req.conditions.folder.startsWith("year_")) {
-        const yr = req.conditions.folder.replace("year_", "");
-        if (!isYearLead(lead, yr)) return false;
-      } else if (req.conditions.folder === "website_form") {
-        if (!isWebsiteFormLead(lead)) return false;
-      } else if (req.conditions.folder === "hot_leads") {
-        if (!isHotLead(lead)) return false;
-      } else {
-        if (!customFolderIds?.has(lead.id)) return false;
-      }
-    }
-    const targetYear = req.conditions.folder?.startsWith("year_") ? req.conditions.folder.slice(5) : req.conditions.year;
-    if (targetYear && targetYear !== "all" && !isYearLead(lead, targetYear)) return false;
-
-    if (req.conditions.source && req.conditions.source !== "all" && lead.source !== req.conditions.source) return false;
-
-    // 1. Area filter (Location-scoped matching)
-    if (req.conditions.areas && req.conditions.areas.length > 0) {
-      const leadPrimary = lead.primaryLocality.toLowerCase();
-      const matched = req.conditions.areas.some((area) => {
-        const canonicalTarget = (CANONICAL_AREA_ALIASES[area.toLowerCase().trim()] || area.trim()).toLowerCase();
-        return leadPrimary === canonicalTarget || leadPrimary.includes(canonicalTarget);
-      });
-      if (!matched) return false;
-    }
-
-    // 2. Pincodes
-    if (req.conditions.pincodes && req.conditions.pincodes.length > 0) {
-      const leadPin = String(lead.pincode ?? "").trim();
-      const matched = req.conditions.pincodes.some((pin) => leadPin.includes(pin.trim()));
-      if (!matched) return false;
-    }
-
-    // 3. Services
-    if (req.conditions.services && req.conditions.services.length > 0) {
-      const leadService = String(lead.service ?? "").toLowerCase().trim();
-      if (!leadService) return false;
-      const matched = req.conditions.services.some((srv) =>
-        leadService.includes(srv.toLowerCase().trim()),
-      );
-      if (!matched) return false;
-    }
-
-    // 4. Min Price
-    if (req.conditions.min_price != null && req.conditions.min_price > 0) {
-      const price = lead.price_total ?? 0;
-      if (price < req.conditions.min_price) return false;
-    }
-
-    return true;
-  });
+  if (req.conditions.include_assigned) {
+    const { candidates, membership } = await allocationCandidates(req.conditions, req);
+    const { data, error } = await supabase().rpc("allocate_with_recycling", {
+      p_candidates: candidates.map(lead => ({ id: lead.id, status: lead.status ?? "new", list_id: membership.get(lead.id) ?? null })),
+      p_count: req.lead_count,
+      p_assignees: assignees,
+      p_target_list: req.target_list_id ?? null,
+      p_schedule: req.schedule_id ?? null,
+      p_excluded_staff: req.exclude_admin_user_ids ?? assignees,
+      p_type: req.allocation_type ?? "manual",
+      p_reason: req.notes || "Allocation including already-assigned leads",
+    });
+    if (error) throw error;
+    invalidateAssignedLeadsCache();
+    invalidateLeadListCache();
+    invalidateAreaCountsCache();
+    return { allocatedCount: data.leadIds.length, leadIds: data.leadIds, reassignedCount: data.reassignedCount, unassignedCount: data.leadIds.length - data.reassignedCount };
+  }
+  const { candidates: candidateLeads } = await allocationCandidates(req.conditions);
 
   const selectedLeadIds = candidateLeads.slice(0, req.lead_count).map((l) => l.id);
 
@@ -440,6 +486,8 @@ export async function executeLeadAllocation(req: {
 export async function createAllocationSchedule(req: NewLeadAllocationRequest): Promise<{
   id?: string;
   allocatedCount?: number;
+  reassignedCount?: number;
+  unassignedCount?: number;
   mode: string;
   warnings?: string[];
 }> {
@@ -471,7 +519,7 @@ export async function createAllocationSchedule(req: NewLeadAllocationRequest): P
 
     const warnings = [...(res.warnings ?? [])];
     if (historyError) warnings.push("Leads were assigned, but the dispatch record could not be saved. Do not repeat the allocation.");
-    return { allocatedCount: res.allocatedCount, mode: "once_now", ...(warnings.length ? { warnings } : {}) };
+    return { allocatedCount: res.allocatedCount, reassignedCount: res.reassignedCount, unassignedCount: res.unassignedCount, mode: "once_now", ...(warnings.length ? { warnings } : {}) };
   }
 
   // 2. Daily Recurring Schedule
@@ -528,6 +576,7 @@ export async function createAllocationSchedule(req: NewLeadAllocationRequest): P
         conditions: req.conditions,
         assignee_ids: req.assignee_ids,
         target_list_id: req.target_list_id,
+        schedule_id: data.id,
         notes: req.notes || "Initial Auto-Refill batch allocation",
         allocation_type: "queue_replenish",
       });
@@ -545,6 +594,8 @@ export async function createAllocationSchedule(req: NewLeadAllocationRequest): P
     return {
       id: data.id,
       allocatedCount: initialAllocation.allocatedCount,
+      reassignedCount: initialAllocation.reassignedCount,
+      unassignedCount: initialAllocation.unassignedCount,
       mode: "queue_replenish",
       warnings,
     };
@@ -803,6 +854,8 @@ export async function processQueueAutoRefills(): Promise<{ refilledStaffCount: n
       try {
         const res = await executeLeadAllocation({
           lead_count: rule.lead_count ?? 10,
+          schedule_id: rule.id,
+          exclude_admin_user_ids: rule.assignee_ids ?? [],
           conditions: rule.conditions ?? {},
           assignee_ids: eligible,
           target_list_id: rule.target_list_id,
@@ -850,6 +903,7 @@ export async function processScheduledJobs(): Promise<{ executedCount: number }>
       try {
         const res = await executeLeadAllocation({
           lead_count: job.lead_count,
+          schedule_id: job.id,
           conditions: job.conditions ?? {},
           assignee_ids: job.assignee_ids ?? [],
           target_list_id: job.target_list_id,
@@ -897,6 +951,8 @@ export async function processScheduledJobs(): Promise<{ executedCount: number }>
           try {
             const res = await executeLeadAllocation({
               lead_count: rule.lead_count ?? 10,
+              schedule_id: rule.id,
+              exclude_admin_user_ids: rule.assignee_ids ?? [],
               conditions: rule.conditions ?? {},
               assignee_ids: rule.assignee_ids ?? [],
               target_list_id: rule.target_list_id,
