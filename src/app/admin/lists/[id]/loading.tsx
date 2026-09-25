@@ -1,5 +1,5 @@
 import AdminSkeleton from "@/app/admin/_components/AdminSkeleton";
 
 export default function Loading() {
-  return <AdminSkeleton layout="folders" label="Loading leads" />;
+  return <AdminSkeleton layout="table" label="Loading list leads" />;
 }
