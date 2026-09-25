@@ -15,9 +15,12 @@ if (typeof Element !== 'undefined') {
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }) }));
 
+const { fetchPage } = vi.hoisted(() => ({ fetchPage: vi.fn() }));
+
 // Mock actions used by the component
 vi.mock('../actions', () => {
   return {
+    getLeadsInListAction: fetchPage,
     searchLeadsForListAction: async (q: string) => {
       return [
         { id: 'a', name: 'Alice', phone: '111', service: 'Service A', service_option: null, add_on_labels: null, vehicle_type: null, car_brand: null, car_model: null, car_number: null, status: 'new' },
@@ -135,4 +138,16 @@ test('view-only staff do not see mutation controls and refreshed server data rep
   expect(screen.queryByText('Upload Leads')).toBeNull();
   rerender(<LeadListDetailClient list={fakeList as any} initialLeads={[]} isSuperAdmin={false} canManage={false} />);
   expect(container.textContent).not.toContain("Alice O'Neil");
+});
+
+
+test('fetches the next page from the server and shows full-list counts', async () => {
+  fetchPage.mockResolvedValue({ leads: [{ id: 'next', name: 'Next page lead', status: 'new', service: 'Wash' }], count: 150, statusCounts: { total: 150, new: 150 }, services: [{ service: 'Wash', count: 150 }] });
+  const { container } = render(<LeadListDetailClient list={{ ...fakeList, lead_count: 150, status_counts: { new: 150 } } as any} initialLeads={[{ id: 'first', name: 'First page lead', status: 'new', service: 'Wash' } as any]} serverPagination initialServices={[{ service: 'Wash', count: 150 }]} isSuperAdmin={false} />);
+  expect(fetchPage).not.toHaveBeenCalled();
+  expect(container.textContent).toContain('150');
+  await userEvent.click(screen.getByRole('button', { name: 'Next ›' }));
+  await waitFor(() => expect(fetchPage).toHaveBeenCalledWith('list1', expect.objectContaining({ limit: 50, offset: 50 })));
+  await waitFor(() => expect(container.textContent).toContain('Next page lead'));
+  expect(container.textContent).not.toContain('First page lead');
 });

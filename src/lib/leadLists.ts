@@ -1,3 +1,4 @@
+import { databaseLeadReadsEnabled, queryLeadDatabase } from "./lead-query";
 import { isCustomLeadFolder, moveLeadsToCustomFolder, removeLeadFromCustomFolder } from "./lead-folder-items";
 import "server-only";
 import { readAllRows } from "./db-pagination";
@@ -123,7 +124,16 @@ export async function listLeadLists(opts: {
     { total: number; completed: number; pending: number; statuses: Record<string, number> }
   >();
 
-  if (listIds.length > 0) {
+  if (databaseLeadReadsEnabled() && listIds.length > 0) {
+    const stats = await queryLeadDatabase<Array<{list_id: string; status: string; count: number}>>("listStats", { listIds, assignedAdminUserId: opts.assignedAdminUserId });
+    for (const stat of stats) {
+      const current = statsByListId.get(stat.list_id) ?? { total: 0, completed: 0, pending: 0, statuses: {} as Record<string, number> };
+      current.total += stat.count;
+      current[isCompletedLeadStatus(stat.status) ? "completed" : "pending"] += stat.count;
+      current.statuses[stat.status] = stat.count;
+      statsByListId.set(stat.list_id, current);
+    }
+  } else if (listIds.length > 0) {
     const allItems: { list_id: string; lead_id: string; leads: unknown }[] = [];
     for (const table of ["lead_list_items", "lead_folder_items"]) {
       const ids = data.filter((row) => Boolean(row.is_custom_folder) === (table === "lead_folder_items")).map((row) => row.id);
@@ -212,16 +222,24 @@ export async function getLeadList(listId: string): Promise<LeadListRow | null> {
   if (error) throw error;
   if (!data) return null;
 
+  let total = 0;
+  let completed = 0;
+  let pending = 0;
+  const statuses: Record<string, number> = {};
+  if (databaseLeadReadsEnabled()) {
+    const stats = await queryLeadDatabase<Array<{status: string; count: number}>>("listStats", { listIds: [listId] });
+    for (const stat of stats) {
+      total += stat.count; statuses[stat.status] = stat.count;
+      if (isCompletedLeadStatus(stat.status)) completed += stat.count; else pending += stat.count;
+    }
+  } else {
   const allItems = await readAllRows(supabase()
     .from(data.is_custom_folder ? "lead_folder_items" : "lead_list_items")
     .select("lead_id, leads:lead_id (status)")
     .eq("list_id", listId)
     .order("lead_id", { ascending: true }));
 
-  const total = allItems.length;
-  let completed = 0;
-  let pending = 0;
-  const statuses: Record<string, number> = {};
+  total = allItems.length;
 
   if (allItems) {
     for (const item of allItems) {
@@ -234,6 +252,8 @@ export async function getLeadList(listId: string): Promise<LeadListRow | null> {
         pending += 1;
       }
     }
+  }
+
   }
 
   const completionRate = total > 0 ? Math.round((completed / total) * 100) : 0;
@@ -338,6 +358,11 @@ export async function getLeadsInList(listId: string, opts: {
   search?: string;
   assignedAdminUserId?: string;
 } = {}): Promise<LeadRow[]> {
+  if (databaseLeadReadsEnabled() && opts.limit != null) {
+    const { listPaginatedLeads } = await import("./leads");
+    const result = await listPaginatedLeads({ folder: listId, status: opts.status as LeadRow["status"], search: opts.search, assignedAdminUserId: opts.assignedAdminUserId, limit: opts.limit, offset: opts.offset });
+    return result.leads;
+  }
   const ENCRYPTED_LEAD_FIELDS = [
     "phone",
     "car_number",

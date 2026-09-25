@@ -630,3 +630,48 @@ Old schedules without `include_assigned` continue using unassigned leads only.
 Database integration checks can be run against an **empty disposable PostgreSQL
 database** using `psql -v ON_ERROR_STOP=1 -f supabase/tests/global-allocation-recycling.sql`.
 This script creates minimal fixture tables and must never run against application data.
+
+### Database-backed lead reads (migration 0045)
+
+Admin lead pages now filter, sort and paginate in PostgreSQL. Status, service,
+area, folder and list counts are grouped in the database. Allocation previews
+return counts; allocation dispatches fetch a bounded candidate batch instead of
+all lead IDs. List detail pages load 50 leads initially and request additional
+pages on demand (25/50/100 per page).
+
+The migration persists derived locality/year/import metadata using the same
+application resolver as before. An address, pincode, area, source, registration
+metadata or creation-date change marks only that lead for refresh. Status changes
+do not rebuild location data. A fingerprint check prevents a stale refresh from
+overwriting newer inputs. Raw addresses remain encrypted.
+
+Deployment order:
+
+1. Apply `supabase/migrations/0045_lead_query_performance.sql` after migration
+   0044. It adds indexes and database functions; schedule index creation for a
+   suitable deployment window on a large live table.
+2. Backfill derived metadata before serving the new application, using the
+   existing Supabase service-role credentials and encryption key:
+   `KLICSEO_BACKFILL_LEAD_QUERY=1 node --env-file=.env node_modules/vitest/vitest.mjs run scripts/lead-query-backfill.test.ts`
+   This writes derived columns only. It is resumable and skips completed rows.
+3. Deploy the application. Database reads are enabled by default. Set
+   `LEAD_DATABASE_READS=false` to temporarily use the previous read implementation
+   without removing the migration.
+4. Set `LEAD_QUERY_TIMING=true` to log query mode and elapsed milliseconds (no
+   customer data or filter values). Slow reads above one second log automatically.
+   Compare cold/warm page timings and inspect PostgreSQL query plans before/after.
+
+Without the explicit backfill, the first database-backed read performs it and
+can be slow. Subsequent reads refresh only pending rows. If the locality resolver
+or pincode lookup data changes, restart the app to clear lookup caches and mark
+metadata for rebuilding with `update public.leads set query_ready = false`, then
+rerun the backfill. Encrypted substring search still decrypts candidates on the
+server after database scoping; request-local caching shares that scan between
+page results and status counts. Detailed analytics still consume lightweight
+summaries, but no longer rebuild locality by decrypting all addresses.
+
+Run `supabase/tests/lead-query-performance.sql` with `psql -v ON_ERROR_STOP=1 -f`
+in an **empty disposable database only**. It verifies paging, scopes, counts,
+recycling eligibility, metadata invalidation and stale-write protection, then
+prints an execution plan on a 10,000-row synthetic fixture. It is not a production
+latency benchmark.

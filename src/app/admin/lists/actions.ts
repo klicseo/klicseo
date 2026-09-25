@@ -315,13 +315,24 @@ export async function getLeadsInListAction(
     offset?: number;
     status?: LeadStatus | "all";
     search?: string;
+    service?: string;
   } = {}
-): Promise<{ leads: any[]; count: number }> {
+): Promise<{ leads: any[]; count: number; error?: string; statusCounts?: Record<string, number>; services?: Array<{service: string; count: number}> }> {
   const me = await requirePermission("leads.view");
 
   try {
     await assertListAccess(me, listId);
     const scope = await resolveScope(me);
+    const { databaseLeadReadsEnabled } = await import("@/lib/lead-query");
+    if (databaseLeadReadsEnabled()) {
+      const { listPaginatedLeads, listLeadStatusSummary, listServiceCounts } = await import("@/lib/leads");
+      const base = { folder: listId, assignedAdminUserId: scope?.kind === "assigned" ? scope.adminUserId : undefined };
+      const [result, statusCounts, services] = await Promise.all([
+        listPaginatedLeads({ ...base, status: opts.status, search: opts.search, service: opts.service, limit: Math.min(100, opts.limit ?? 50), offset: opts.offset ?? 0 }),
+        listLeadStatusSummary(base), listServiceCounts(base),
+      ]);
+      return { leads: result.leads, count: result.totalCount, statusCounts, services };
+    }
     const leads = await getLeadsInList(listId, { status: opts.status, search: opts.search, assignedAdminUserId: scope?.kind === "assigned" ? scope.adminUserId : undefined });
     const offset = opts.offset ?? 0;
     return {
@@ -330,7 +341,7 @@ export async function getLeadsInListAction(
     };
   } catch (err) {
     console.error("Failed to get leads in list:", err);
-    return { leads: [], count: 0 };
+    return { leads: [], count: 0, error: "Could not load leads. Please retry." };
   }
 }
 

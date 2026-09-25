@@ -1,3 +1,4 @@
+import { databaseLeadReadsEnabled, queryLeadDatabase, queryMatchingLeadIds, decodeQueryLead } from "./lead-query";
 import { getManualLeadFolderIds } from "./lead-folder-registry";
 import "server-only";
 import { readAllRows } from "./db-pagination";
@@ -180,6 +181,8 @@ export async function listServiceCounts(
   const options: ListServiceCountsOptions =
     typeof opts === "string" ? { assignedAdminUserId: opts } : opts;
 
+  if (databaseLeadReadsEnabled()) return queryLeadDatabase<Array<{ service: string; count: number }>>("services", options);
+
   const locationIndex = await getOrBuildLocationIndex();
   let candidateLeads = locationIndex.allLeads;
 
@@ -323,6 +326,11 @@ export async function listLeadStatusSummary(
 ): Promise<LeadStatusSummary> {
   const options: ListStatusSummaryOptions =
     typeof opts === "string" ? { assignedAdminUserId: opts } : opts;
+
+  if (databaseLeadReadsEnabled()) {
+    const matchedIds = await queryMatchingLeadIds(options);
+    return queryLeadDatabase<LeadStatusSummary>("status", { ...options, matchedIds });
+  }
 
   const locationIndex = await getOrBuildLocationIndex();
   let candidateLeads = locationIndex.allLeads;
@@ -495,6 +503,12 @@ export async function listPaginatedLeads(
   const offset = opts.offset ?? (page - 1) * pageSize;
   const limit = opts.limit ?? pageSize;
 
+  if (databaseLeadReadsEnabled()) {
+    const matchedIds = await queryMatchingLeadIds(opts);
+    const result = await queryLeadDatabase<{ leads: LeadRow[]; totalCount: number }>("page", { ...opts, matchedIds }, limit, offset);
+    return { ...result, leads: result.leads.map(decodeQueryLead), page, pageSize, totalPages: Math.max(1, Math.ceil(result.totalCount / pageSize)) };
+  }
+
   const locationIndex = await getOrBuildLocationIndex();
   let candidateLeads = locationIndex.allLeads;
 
@@ -656,6 +670,32 @@ export async function listFolderSummaries(assignedAdminUserId?: string): Promise
 
   if (assignedAdminUserId) {
     listQuery = listQuery.eq("assigned_admin_user_id", assignedAdminUserId);
+  }
+
+  if (databaseLeadReadsEnabled()) {
+    const [totals, folderRows] = await Promise.all([
+      queryLeadDatabase<{ totalLeads: number; system: Array<{ kind: string; year: string; count: number; bookedCount: number }> }>("folderCounts", { assignedAdminUserId }),
+      readAllRows(listQuery.order("id")),
+    ]);
+    const stats = await queryLeadDatabase<Array<{ list_id: string; status: string; count: number }>>("listStats", { listIds: folderRows.filter(row => row.is_custom_folder).map(row => row.id), assignedAdminUserId });
+    const systemFolders: FolderSummary[] = [
+      { id: "website_form", type: "system_source", name: "Website Form Leads", description: "Online booking form submissions", source: "wizard", count: 0, bookedCount: 0 },
+      { id: "hot_leads", type: "system_source", name: "Hot Leads (Admin Added)", description: "Directly added by admin staff", source: "admin", count: 0, bookedCount: 0 },
+    ];
+    for (const row of totals.system) {
+      let folder = systemFolders.find(folder => folder.id === (row.kind === "year" ? `year_${row.year}` : row.kind));
+      if (!folder) {
+        folder = { id: `year_${row.year}`, type: "system_year", name: `${row.year} Leads`, description: `All leads registered in ${row.year}`, year: row.year, count: 0, bookedCount: 0 };
+        systemFolders.push(folder);
+      }
+      folder.count += row.count; folder.bookedCount += row.bookedCount;
+    }
+    const customFolders: FolderSummary[] = folderRows.filter(row => row.is_custom_folder).map(row => {
+      const counts = stats.filter(stat => stat.list_id === row.id);
+      const user: any = row.admin_users;
+      return { id: row.id, type: "custom_list", name: row.name, count: counts.reduce((sum, stat) => sum + stat.count, 0), bookedCount: counts.find(stat => stat.status === "booked")?.count ?? 0, assignedStaffId: row.assigned_admin_user_id, assignedStaffName: user?.employees?.name || user?.email?.split("@")[0] };
+    });
+    return { totalLeads: totals.totalLeads, systemFolders: [...systemFolders.slice(0, 2), ...systemFolders.slice(2).sort((a,b) => (b.year ?? "").localeCompare(a.year ?? ""))], customFolders };
   }
 
   const [locationIndex, folderRows] = await Promise.all([

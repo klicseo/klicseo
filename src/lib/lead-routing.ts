@@ -1,3 +1,4 @@
+import { databaseLeadReadsEnabled, queryLeadDatabase } from "./lead-query";
 import { matchesAllocationStatus } from "./lead-routing-shared";
 import { allocationFolderLeadIds } from "./lead-folder-items";
 import "server-only";
@@ -123,6 +124,12 @@ export async function countMatchingLeads(
   context: AllocationDestinationContext = {},
 ): Promise<{ count: number; totalUnallocated: number; unassignedCount?: number; assignedCount?: number }> {
   try {
+    if (databaseLeadReadsEnabled()) {
+      const conditions = await allocationDatabaseFilter(filter, context);
+      const counts = await queryLeadDatabase<{count: number; assignedCount: number; unassignedCount: number}>("allocationCount", conditions);
+      const baseline = await queryLeadDatabase<{count: number}>("allocationCount", { ...conditions, include_assigned: false, areas: undefined, pincodes: undefined, services: undefined, min_price: undefined });
+      return { ...counts, totalUnallocated: baseline.count };
+    }
     if (filter.include_assigned) {
       const [{ candidates, membership }, baseline] = await Promise.all([allocationCandidates(filter, context), countMatchingLeads({ ...filter, include_assigned: false })]);
       const assignedCount = candidates.filter(lead => membership.has(lead.id)).length;
@@ -277,7 +284,21 @@ async function assertAllocationDestination(assigneeIds: string[], targetListId?:
   return null;
 }
 
-async function allocationCandidates(conditions: LeadAllocationFilter, context: AllocationDestinationContext = {}) {
+async function allocationDatabaseFilter(conditions: LeadAllocationFilter, context: AllocationDestinationContext) {
+  let excludedStaff = [...(context.assignee_ids ?? []), ...(context.exclude_admin_user_ids ?? [])];
+  if (context.target_list_id) {
+    const { data, error } = await supabase().from("lead_lists").select("assigned_admin_user_id").eq("id", context.target_list_id).maybeSingle();
+    if (error) throw error;
+    excludedStaff = data?.assigned_admin_user_id ? [data.assigned_admin_user_id] : [];
+  }
+  return { ...conditions, areas: conditions.areas?.map(area => CANONICAL_AREA_ALIASES[area.toLowerCase().trim()] || area.trim()), ...context, excludedStaff, allocation: true };
+}
+
+async function allocationCandidates(conditions: LeadAllocationFilter, context: AllocationDestinationContext = {}, limit = 250) {
+  if (databaseLeadReadsEnabled()) {
+    const candidates = await queryLeadDatabase<Array<{ id: string; status: string; list_id: string | null }>>("allocation", await allocationDatabaseFilter(conditions, context), limit);
+    return { candidates, membership: new Map(candidates.filter(lead => lead.list_id).map(lead => [lead.id, lead.list_id!])) };
+  }
   const [locationIndex, globalAssignedSet, customFolderIds] = await Promise.all([
     getOrBuildLocationIndex(),
     getAllAssignedLeadIds({ fresh: true }),
@@ -390,7 +411,7 @@ export async function executeLeadAllocation(req: AllocationDestinationContext & 
   const destination = await assertAllocationDestination(assignees, req.target_list_id);
   // 1. Fetch location index and assigned lead IDs
   if (req.conditions.include_assigned) {
-    const { candidates, membership } = await allocationCandidates(req.conditions, req);
+    const { candidates, membership } = await allocationCandidates(req.conditions, req, req.lead_count + 250);
     const { data, error } = await supabase().rpc("allocate_with_recycling", {
       p_candidates: candidates.map(lead => ({ id: lead.id, status: lead.status ?? "new", list_id: membership.get(lead.id) ?? null })),
       p_count: req.lead_count,
@@ -407,7 +428,7 @@ export async function executeLeadAllocation(req: AllocationDestinationContext & 
     invalidateAreaCountsCache();
     return { allocatedCount: data.leadIds.length, leadIds: data.leadIds, reassignedCount: data.reassignedCount, unassignedCount: data.leadIds.length - data.reassignedCount };
   }
-  const { candidates: candidateLeads } = await allocationCandidates(req.conditions);
+  const { candidates: candidateLeads } = await allocationCandidates(req.conditions, req, req.lead_count + 250);
 
   const selectedLeadIds = candidateLeads.slice(0, req.lead_count).map((l) => l.id);
 

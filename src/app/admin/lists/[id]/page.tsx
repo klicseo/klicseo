@@ -1,3 +1,5 @@
+import { databaseLeadReadsEnabled } from "@/lib/lead-query";
+import { listServiceCounts } from "@/lib/leads";
 import { redirect, notFound } from "next/navigation";
 import AdminShell from "../../AdminShell";
 import AdminError from "../../AdminError";
@@ -23,6 +25,7 @@ export default async function LeadListPage({
   let adminUsers: { id: string; email: string; name: string }[] = [];
   let notFoundError = false;
   let leadStatuses = undefined;
+  let services: Array<{service: string; count: number}> = [];
 
   try {
     const [fetchedList, siteSettings] = await Promise.all([
@@ -45,11 +48,13 @@ export default async function LeadListPage({
 
     const leadScope = await resolveScope(me);
     if (list && !notFoundError) {
-      const [fetchedLeads, assignableUsers] = await Promise.all([
-        getLeadsInList(id, { assignedAdminUserId: leadScope?.kind === "assigned" ? leadScope.adminUserId : undefined }),
+      const [fetchedLeads, assignableUsers, fetchedServices] = await Promise.all([
+        getLeadsInList(id, { limit: databaseLeadReadsEnabled() ? 50 : undefined, assignedAdminUserId: leadScope?.kind === "assigned" ? leadScope.adminUserId : undefined }),
         isSuperAdmin ? listAssignableAdminUsers().catch(() => []) : Promise.resolve([]),
+        databaseLeadReadsEnabled() ? listServiceCounts({ folder: id, assignedAdminUserId: leadScope?.kind === "assigned" ? leadScope.adminUserId : undefined }) : Promise.resolve([]),
       ]);
       leads = fetchedLeads;
+      services = fetchedServices;
       adminUsers = assignableUsers.map((u) => ({ id: u.id, email: u.email, name: u.name }));
     }
   } catch (err) {
@@ -69,6 +74,8 @@ export default async function LeadListPage({
       <LeadListDetailClient
         list={list}
         initialLeads={leads}
+        serverPagination={databaseLeadReadsEnabled()}
+        initialServices={services}
         adminUsers={adminUsers}
         isSuperAdmin={me?.role === "super_admin"}
         leadStatuses={leadStatuses}

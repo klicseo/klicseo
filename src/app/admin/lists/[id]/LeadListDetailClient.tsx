@@ -20,6 +20,7 @@ import {
   addLeadsToListAction,
   removeLeadFromListAction,
   searchLeadsForListAction,
+  getLeadsInListAction,
 } from "../actions";
 
 type LeadForList = {
@@ -57,6 +58,8 @@ export default function LeadListDetailClient({
   isSuperAdmin,
   leadStatuses,
   canManage = false,
+  serverPagination = false,
+  initialServices = [],
 }: {
   list: LeadListRow;
   initialLeads: LeadForList[];
@@ -64,7 +67,14 @@ export default function LeadListDetailClient({
   isSuperAdmin: boolean;
   leadStatuses?: CustomLeadStatus[];
   canManage?: boolean;
+  serverPagination?: boolean;
+  initialServices?: Array<{service: string; count: number}>;
 }) {
+  const [remoteCount, setRemoteCount] = useState(list.lead_count ?? initialLeads.length);
+  const [remoteStatuses, setRemoteStatuses] = useState<Record<string, number>>(list.status_counts ?? {});
+  const [remoteServices, setRemoteServices] = useState(initialServices);
+  const [reloadTick, setReloadTick] = useState(0);
+  const [loadingPage, setLoadingPage] = useState(false);
   const [leads, setLeads] = useState<LeadForList[]>(initialLeads);
   const [previousInitialLeads, setPreviousInitialLeads] = useState(initialLeads);
   if (previousInitialLeads !== initialLeads) {
@@ -121,53 +131,87 @@ export default function LeadListDetailClient({
 
   // Derive unique services from the leads in this list
   const services = useMemo(() => {
+    if (serverPagination) return remoteServices.map(service => service.service).sort();
     const set = new Set<string>();
     for (const l of leads) {
       if (l.service) set.add(l.service);
     }
     return Array.from(set).sort();
-  }, [leads]);
+  }, [leads, serverPagination, remoteServices]);
 
   // Filter leads by status + service
   const filteredLeads = useMemo(() => {
+    if (serverPagination) return leads;
     return leads.filter((l) => {
       if (!matchesLeadSearch(l, filterQuery)) return false;
       if (statusFilter !== "all" && l.status !== statusFilter) return false;
       if (serviceFilter !== "all" && l.service !== serviceFilter) return false;
       return true;
     });
-  }, [leads, statusFilter, serviceFilter, filterQuery]);
+  }, [leads, statusFilter, serviceFilter, filterQuery, serverPagination]);
+
+  const filteredCount = serverPagination ? remoteCount : filteredLeads.length;
+  const listTotal = serverPagination ? (remoteStatuses.total ?? list.lead_count ?? leads.length) : leads.length;
+  const pageRequest = useRef("");
+  useEffect(() => {
+    if (!serverPagination) return;
+    const key = JSON.stringify([list.id, currentPage, pageSize, statusFilter, serviceFilter, filterQuery, reloadTick]);
+    if (!pageRequest.current && currentPage === 1 && pageSize === 50 && statusFilter === "all" && serviceFilter === "all" && !filterQuery && !reloadTick) { pageRequest.current = key; return; }
+    let cancelled = false;
+    setLoadingPage(true);
+    const timer = setTimeout(async () => {
+      try {
+        const result = await getLeadsInListAction(list.id, { limit: pageSize === "all" ? 100 : pageSize, offset: (currentPage - 1) * (pageSize === "all" ? 100 : pageSize), status: statusFilter, service: serviceFilter, search: filterQuery });
+        if (cancelled) return;
+        if (result.error) throw new Error(result.error);
+        setError(null); setLeads(result.leads); setRemoteCount(result.count);
+        if (result.statusCounts) setRemoteStatuses(result.statusCounts);
+        if (result.services) setRemoteServices(result.services);
+        const pages = Math.max(1, Math.ceil(result.count / (pageSize === "all" ? 100 : pageSize)));
+        if (currentPage > pages) setCurrentPage(pages);
+      } catch (error) { if (!cancelled) setError(error instanceof Error ? error.message : "Could not load leads."); }
+      finally { if (!cancelled) setLoadingPage(false); }
+    }, filterQuery ? 250 : 0);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [serverPagination, list.id, currentPage, pageSize, statusFilter, serviceFilter, filterQuery, reloadTick]);
 
   const totalPages = useMemo(() => {
     if (pageSize === "all") return 1;
-    return Math.max(1, Math.ceil(filteredLeads.length / pageSize));
-  }, [filteredLeads.length, pageSize]);
+    return Math.max(1, Math.ceil(filteredCount / pageSize));
+  }, [filteredCount, pageSize]);
 
   const paginatedLeads = useMemo(() => {
+    if (serverPagination) return leads;
     if (pageSize === "all") return filteredLeads;
     const start = (currentPage - 1) * pageSize;
     return filteredLeads.slice(start, start + pageSize);
-  }, [filteredLeads, currentPage, pageSize]);
+  }, [filteredLeads, currentPage, pageSize, serverPagination, leads]);
 
   // Counts per status
   const statusCounts = useMemo(() => {
     const counts = new Map<LeadStatus | "all", number>();
+    if (serverPagination) {
+      counts.set("all", listTotal);
+      for (const [status, count] of Object.entries(remoteStatuses)) counts.set(status as LeadStatus, count);
+      return counts;
+    }
     counts.set("all", leads.length);
     for (const l of leads) {
       counts.set(l.status, (counts.get(l.status) ?? 0) + 1);
     }
     return counts;
-  }, [leads]);
+  }, [leads, serverPagination, listTotal, remoteStatuses]);
 
   // Counts per service
   const serviceCounts = useMemo(() => {
     const counts = new Map<string, number>();
+    if (serverPagination) return new Map([["all", listTotal], ...remoteServices.map(service => [service.service, service.count] as [string, number])]);
     counts.set("all", leads.length);
     for (const l of leads) {
       if (l.service) counts.set(l.service, (counts.get(l.service) ?? 0) + 1);
     }
     return counts;
-  }, [leads]);
+  }, [leads, serverPagination, listTotal, remoteServices]);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -328,7 +372,7 @@ export default function LeadListDetailClient({
       if (result.error) {
         setLeads(previous);
         setError(result.error);
-      }
+      } else if (serverPagination) setReloadTick(tick => tick + 1);
     });
   }
 
@@ -353,6 +397,7 @@ export default function LeadListDetailClient({
         .filter((lead) => selectedLeadsToAdd.has(lead.id))
         .forEach((lead) => byId.set(lead.id, lead));
       setLeads(Array.from(byId.values()));
+      if (serverPagination) setReloadTick(tick => tick + 1);
       setSelectedLeadsToAdd(new Set());
       setSearchResults([]);
       setSearchQuery("");
@@ -362,15 +407,17 @@ export default function LeadListDetailClient({
 
   // Status breakdown map for modal
   const statusBreakdownObj = useMemo(() => {
+    if (serverPagination) return remoteStatuses;
     const obj: Record<string, number> = {};
     for (const l of leads) {
       obj[l.status] = (obj[l.status] ?? 0) + 1;
     }
     return obj;
-  }, [leads]);
+  }, [leads, serverPagination, remoteStatuses]);
 
   return (
     <>
+      {loadingPage && <p role="status" className="text-sm text-white/60">Loading leads…</p>}
       {bannerMessage && (
         <div className="p-4 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center justify-between mb-4 animate-in fade-in">
           <div className="flex items-center gap-2">
@@ -395,14 +442,14 @@ export default function LeadListDetailClient({
             {list.name}
           </h1>
           <p className="text-white/45 text-sm">
-            {filteredLeads.length === leads.length
-              ? `${leads.length} leads`
-              : `${filteredLeads.length} of ${leads.length} leads`}
+            {filteredCount === listTotal
+              ? `${listTotal} leads`
+              : `${filteredCount} of ${listTotal} leads`}
             {" | Assigned to: "}{list.assigned_admin_user?.name || "-"}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          {isSuperAdmin && leads.length > 0 && (
+          {isSuperAdmin && listTotal > 0 && (
             <button
               type="button"
               onClick={() => setRecycleModalOpen(true)}
@@ -523,7 +570,7 @@ export default function LeadListDetailClient({
         {statusFilter !== "all" && (
           <div className="text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/20 px-3 py-1.5 rounded-xl flex items-center justify-between">
             <span>
-              Showing <strong>{filteredLeads.length} {LEAD_STATUS_LABEL[statusFilter]}</strong> {filteredLeads.length === 1 ? "lead" : "leads"} (out of {leads.length} total leads in this list).
+              Showing <strong>{filteredCount} {LEAD_STATUS_LABEL[statusFilter]}</strong> {filteredCount === 1 ? "lead" : "leads"} (out of {listTotal} total leads in this list).
             </span>
             <button
               type="button"
@@ -651,16 +698,16 @@ export default function LeadListDetailClient({
         </div>
       </div>}
 
-      {filteredLeads.length === 0 ? (
+      {filteredCount === 0 ? (
         <div className="text-center py-12 text-white/40">
-          {leads.length === 0 ? "No leads in this list yet. Add leads using the search above." : "No leads match the current filters."}
+          {listTotal === 0 ? "No leads in this list yet. Add leads using the search above." : "No leads match the current filters."}
         </div>
       ) : (
         <div className="space-y-2">
           <div className="flex items-center justify-between px-1 text-xs">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-white/60">
-                Showing <strong className="text-white tabular-nums">{filteredLeads.length}</strong> of <strong className="text-white tabular-nums">{leads.length}</strong> total leads in this list
+                Showing <strong className="text-white tabular-nums">{filteredCount}</strong> of <strong className="text-white tabular-nums">{listTotal}</strong> total leads in this list
                 {statusFilter !== "all" && (
                   <span className="ml-1 text-[#E8CC7A]">
                     (Status: <strong>{statusLabelMap[statusFilter] || statusFilter}</strong>)
@@ -673,7 +720,7 @@ export default function LeadListDetailClient({
                   onClick={() => setStatusFilter("all")}
                   className="text-[#E8CC7A] hover:underline font-bold text-xs"
                 >
-                  Show All {leads.length} Leads ➔
+                  Show All {listTotal} Leads ➔
                 </button>
               )}
             </div>
@@ -788,7 +835,7 @@ export default function LeadListDetailClient({
                     </span>
                     <LeadStatusControl
                         canManage={canManage}
-                        onSaved={(status) => setLeads((rows) => rows.map((row) => row.id === lead.id ? { ...row, status } : row))}
+                        onSaved={(status) => { setLeads((rows) => rows.map((row) => row.id === lead.id ? { ...row, status } : row)); if (serverPagination) setReloadTick(tick => tick + 1); }}
                       id={lead.id}
                       status={lead.status}
                       color={statusColorMap[lead.status] || "#C9A84C"}
@@ -890,7 +937,7 @@ export default function LeadListDetailClient({
                     <td className="px-3 py-2">
                       <LeadStatusControl
                         canManage={canManage}
-                        onSaved={(status) => setLeads((rows) => rows.map((row) => row.id === lead.id ? { ...row, status } : row))}
+                        onSaved={(status) => { setLeads((rows) => rows.map((row) => row.id === lead.id ? { ...row, status } : row)); if (serverPagination) setReloadTick(tick => tick + 1); }}
                         id={lead.id}
                         status={lead.status}
                         color={statusColorMap[lead.status] || "#C9A84C"}
@@ -920,21 +967,21 @@ export default function LeadListDetailClient({
         </div>
 
         {/* Pagination Bar */}
-        {filteredLeads.length > 0 && (
+        {filteredCount > 0 && (
           <div className="flex items-center justify-between gap-4 flex-wrap pt-3 pb-4 px-1 text-xs">
             <div className="text-white/50">
               Showing <span className="font-semibold text-white">
-                {pageSize === "all" ? 1 : Math.min((currentPage - 1) * pageSize + 1, filteredLeads.length)}
+                {pageSize === "all" ? 1 : Math.min((currentPage - 1) * pageSize + 1, filteredCount)}
               </span>–<span className="font-semibold text-white">
-                {pageSize === "all" ? filteredLeads.length : Math.min(currentPage * pageSize, filteredLeads.length)}
-              </span> of <span className="font-semibold text-white">{filteredLeads.length}</span> leads
+                {pageSize === "all" ? filteredCount : Math.min(currentPage * pageSize, filteredCount)}
+              </span> of <span className="font-semibold text-white">{filteredCount}</span> leads
             </div>
 
             <div className="flex items-center gap-3">
               {/* Per page switcher */}
               <div className="flex items-center gap-1.5 bg-white/[0.03] border border-white/10 rounded-xl px-2.5 py-1">
                 <span className="text-[11px] text-white/40">Per page:</span>
-                {([25, 50, 100, "all"] as const).map((size) => (
+                {(serverPagination ? [25, 50, 100] as const : [25, 50, 100, "all"] as const).map((size) => (
                   <button
                     key={size}
                     type="button"

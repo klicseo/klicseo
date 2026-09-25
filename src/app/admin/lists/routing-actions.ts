@@ -1,5 +1,6 @@
 "use server";
 
+import { databaseLeadReadsEnabled, queryLeadDatabase } from "@/lib/lead-query";
 import { getOrBuildLocationIndex } from "@/lib/area";
 import { getSiteSettings } from "@/lib/site-settings";
 import { DEFAULT_LEAD_STATUS_ITEMS } from "@/lib/site-settings-shared";
@@ -36,11 +37,13 @@ export async function getAllocationFilterOptionsAction(): Promise<{
   services: string[];
 }> {
   await requireAdminManager();
-  const [settings, index] = await Promise.all([getSiteSettings(), getOrBuildLocationIndex()]);
+  const [settings, services] = await Promise.all([getSiteSettings(), databaseLeadReadsEnabled()
+    ? queryLeadDatabase<Array<{ service: string; count: number }>>("services", {}).then(rows => rows.map(row => row.service.trim()).filter(Boolean))
+    : getOrBuildLocationIndex().then(index => index.allLeads.map(lead => lead.service?.trim()).filter((service): service is string => !!service))]);
   const statuses = settings.leadStatuses?.length ? settings.leadStatuses : DEFAULT_LEAD_STATUS_ITEMS;
   return {
     statuses: statuses.map(({ id, label }) => ({ id, label })),
-    services: [...new Set(index.allLeads.map((lead) => lead.service?.trim()).filter((service): service is string => !!service))].sort((a, b) => a.localeCompare(b)),
+    services: [...new Set(services)].sort((a, b) => a.localeCompare(b)),
   };
 }
 

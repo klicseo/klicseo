@@ -1,3 +1,4 @@
+import { databaseLeadReadsEnabled, queryLeadDatabase } from "./lead-query";
 import { readAllRows } from "./db-pagination";
 import "server-only";
 import { cache } from "react";
@@ -162,17 +163,19 @@ export const CANONICAL_AREA_ALIASES: Record<string, string> = {
 
 let pincodeMapCache: { map: Map<string, string>; expires: number } | null = null;
 
-export async function loadPincodeMap(): Promise<Map<string, string>> {
+export async function loadPincodeMap(strict = false): Promise<Map<string, string>> {
   const now = Date.now();
   if (pincodeMapCache && pincodeMapCache.expires > now) {
     return pincodeMapCache.map;
   }
   const m = new Map<string, string>();
   try {
-    const { data } = await supabase().from("pincode_areas").select("pincode,area");
+    const { data, error } = await supabase().from("pincode_areas").select("pincode,area");
+    if (error) throw error;
     for (const r of (data ?? []) as PincodeAreaRow[]) m.set(r.pincode, r.area);
     pincodeMapCache = { map: m, expires: now + 3600_000 };
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     // best-effort — unknown pincodes simply don't auto-derive
   }
   return m;
@@ -424,6 +427,105 @@ export function setLocationIndexCache(cache: LocationIndexCache | null): void {
 /**
  * Fast parallel-cached index of all lead locations and registration years with in-flight request de-duplication.
  */
+export interface LeadLocationInput {
+  id: string; area: string | null; address: string | null; pincode: string | null;
+  custom_fields: Record<string, any> | null; created_at: string | null;
+  source: string | null; status?: string | null; service?: string | null;
+  service_option?: string | null; price_total?: number | null;
+}
+
+/** Shared derivation for the persistent read model and legacy analytics index. */
+export async function deriveLeadLocations(allRows: LeadLocationInput[], strict = false): Promise<LeadLocationSummary[]> {
+  const pincodeMap = await loadPincodeMap(strict);
+  const knownAreas = [...new Set(pincodeMap.values())];
+
+  const sortedKnown = [
+    ...new Set([...knownAreas, ...DEFAULT_KNOWN_AREAS, ...Object.keys(CANONICAL_AREA_ALIASES)]),
+  ].sort((a, b) => b.length - a.length);
+
+  const compiledAreaRegexes = sortedKnown.map((area) => {
+    const escaped = area
+      .replace(/[+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\./g, "\\.?")
+      .replace(/\s+/g, "\\s+");
+    return {
+      regex: new RegExp(`(^|[^a-zA-Z0-9])${escaped}([^a-zA-Z0-9]|$)`, "i"),
+      canonical: CANONICAL_AREA_ALIASES[area.toLowerCase()] || area,
+    };
+  });
+
+  function resolvePrimaryLocalityFast(
+    rawArea: string | null | undefined,
+    plainAddress: string | null | undefined,
+    pincode: string | null | undefined,
+  ): string | null {
+    const areaTrim = (rawArea || "").trim();
+    const addrTrim = (plainAddress || "").trim();
+    const pinTrim = (pincode || "").trim();
+
+    let cleanedAddr = addrTrim;
+    for (const fp of FALSE_POSITIVE_PHRASES) {
+      cleanedAddr = cleanedAddr.replace(fp, " ");
+    }
+    const addrLower = cleanedAddr.toLowerCase();
+
+    // 1. Scan address text for specific sub-localities (e.g. Adyar, Besant Nagar, T. Nagar, Porur, Perungudi, etc.)
+    for (const item of compiledAreaRegexes) {
+      if (item.regex.test(addrLower)) {
+        return item.canonical;
+      }
+    }
+
+    // 2. Direct Area column if specified
+    if (areaTrim && areaTrim !== "null" && areaTrim !== "Unspecified" && areaTrim !== "Unknown") {
+      const norm = areaTrim.toLowerCase();
+      return CANONICAL_AREA_ALIASES[norm] || areaTrim;
+    }
+
+    // 3. Pincode lookup
+    if (pinTrim && pincodeMap.has(pinTrim)) {
+      const derived = pincodeMap.get(pinTrim)!;
+      return CANONICAL_AREA_ALIASES[derived.toLowerCase()] || derived;
+    }
+
+    // 4. Embedded pincode in address text
+    const pinMatch = addrTrim.match(/\b(6\d{5})\b/);
+    if (pinMatch && pincodeMap.has(pinMatch[1])) {
+      const derived = pincodeMap.get(pinMatch[1])!;
+      return CANONICAL_AREA_ALIASES[derived.toLowerCase()] || derived;
+    }
+
+    return null;
+  }
+
+  const summaries: LeadLocationSummary[] = [];
+  for (const r of allRows) {
+    const plainAddress = unseal(r.address);
+    const primary = resolvePrimaryLocalityFast(r.area, plainAddress, r.pincode);
+    const resolved = primary || "Unspecified";
+    const year = extractLeadYear(r.custom_fields, r.created_at);
+    const isBulk = isBulkUploadLead(r.custom_fields, r.source);
+
+    const summary: LeadLocationSummary = {
+      id: r.id,
+      primaryLocality: resolved,
+      area: r.area,
+      pincode: r.pincode,
+      service: r.service,
+      service_option: r.service_option,
+      price_total: r.price_total,
+      status: r.status,
+      source: r.source,
+      created_at: r.created_at,
+      year,
+      isBulkUpload: isBulk,
+    };
+
+    summaries.push(summary);
+  }
+  return summaries;
+}
+
 export async function getOrBuildLocationIndex(): Promise<LocationIndexCache> {
   const now = Date.now();
   if (locationIndexCache && locationIndexCache.expires > now) {
@@ -436,6 +538,25 @@ export async function getOrBuildLocationIndex(): Promise<LocationIndexCache> {
 
   inFlightLocationIndexPromise = (async () => {
     try {
+      if (databaseLeadReadsEnabled()) {
+        const allLeads = await queryLeadDatabase<LeadLocationSummary[]>("summaries", {});
+        const leadMap = new Map(allLeads.map(lead => [lead.id, lead]));
+        const areaToLeadIds = new Map<string, string[]>();
+        const yearToLeadIds = new Map<string, string[]>();
+        for (const lead of allLeads) {
+          const area = lead.primaryLocality.toLowerCase();
+          if (area !== "unspecified") {
+            if (!areaToLeadIds.has(area)) areaToLeadIds.set(area, []);
+            areaToLeadIds.get(area)!.push(lead.id);
+          }
+          if (lead.year && lead.source !== "wizard") {
+            if (!yearToLeadIds.has(lead.year)) yearToLeadIds.set(lead.year, []);
+            yearToLeadIds.get(lead.year)!.push(lead.id);
+          }
+        }
+        locationIndexCache = { allLeads, leadMap, areaToLeadIds, yearToLeadIds, expires: Date.now() + 300000 };
+        return locationIndexCache;
+      }
       // 1. Get exact total count to fire parallel chunk requests
       const { count, error: countError } = await supabase()
         .from("leads")
@@ -482,93 +603,12 @@ export async function getOrBuildLocationIndex(): Promise<LocationIndexCache> {
       const yearToLeadIds = new Map<string, string[]>();
       const allLeads: LeadLocationSummary[] = [];
 
-      const [pincodeMap, knownAreas] = await Promise.all([
-        loadPincodeMap(),
-        listKnownAreas(),
-      ]);
-
-      const sortedKnown = [
-        ...new Set([...knownAreas, ...DEFAULT_KNOWN_AREAS, ...Object.keys(CANONICAL_AREA_ALIASES)]),
-      ].sort((a, b) => b.length - a.length);
-
-      const compiledAreaRegexes = sortedKnown.map((area) => {
-        const escaped = area
-          .replace(/[+?^${}()|[\]\\]/g, "\\$&")
-          .replace(/\./g, "\\.?")
-          .replace(/\s+/g, "\\s+");
-        return {
-          regex: new RegExp(`(^|[^a-zA-Z0-9])${escaped}([^a-zA-Z0-9]|$)`, "i"),
-          canonical: CANONICAL_AREA_ALIASES[area.toLowerCase()] || area,
-        };
-      });
-
-      function resolvePrimaryLocalityFast(
-        rawArea: string | null | undefined,
-        plainAddress: string | null | undefined,
-        pincode: string | null | undefined,
-      ): string | null {
-        const areaTrim = (rawArea || "").trim();
-        const addrTrim = (plainAddress || "").trim();
-        const pinTrim = (pincode || "").trim();
-
-        let cleanedAddr = addrTrim;
-        for (const fp of FALSE_POSITIVE_PHRASES) {
-          cleanedAddr = cleanedAddr.replace(fp, " ");
-        }
-        const addrLower = cleanedAddr.toLowerCase();
-
-        // 1. Scan address text for specific sub-localities (e.g. Adyar, Besant Nagar, T. Nagar, Porur, Perungudi, etc.)
-        for (const item of compiledAreaRegexes) {
-          if (item.regex.test(addrLower)) {
-            return item.canonical;
-          }
-        }
-
-        // 2. Direct Area column if specified
-        if (areaTrim && areaTrim !== "null" && areaTrim !== "Unspecified" && areaTrim !== "Unknown") {
-          const norm = areaTrim.toLowerCase();
-          return CANONICAL_AREA_ALIASES[norm] || areaTrim;
-        }
-
-        // 3. Pincode lookup
-        if (pinTrim && pincodeMap.has(pinTrim)) {
-          const derived = pincodeMap.get(pinTrim)!;
-          return CANONICAL_AREA_ALIASES[derived.toLowerCase()] || derived;
-        }
-
-        // 4. Embedded pincode in address text
-        const pinMatch = addrTrim.match(/\b(6\d{5})\b/);
-        if (pinMatch && pincodeMap.has(pinMatch[1])) {
-          const derived = pincodeMap.get(pinMatch[1])!;
-          return CANONICAL_AREA_ALIASES[derived.toLowerCase()] || derived;
-        }
-
-        return null;
-      }
-
-      for (const r of allRows) {
-        const plainAddress = unseal(r.address);
-        const primary = resolvePrimaryLocalityFast(r.area, plainAddress, r.pincode);
-        const resolved = primary || "Unspecified";
+      const summaries = await deriveLeadLocations(allRows);
+      for (const summary of summaries) {
+        const r = summary;
+        const resolved = summary.primaryLocality;
         const norm = resolved.toLowerCase();
-        const year = extractLeadYear(r.custom_fields, r.created_at);
-        const isBulk = isBulkUploadLead(r.custom_fields, r.source);
-
-        const summary: LeadLocationSummary = {
-          id: r.id,
-          primaryLocality: resolved,
-          area: r.area,
-          pincode: r.pincode,
-          service: r.service,
-          service_option: r.service_option,
-          price_total: r.price_total,
-          status: r.status,
-          source: r.source,
-          created_at: r.created_at,
-          year,
-          isBulkUpload: isBulk,
-        };
-
+        const year = summary.year;
         leadMap.set(r.id, summary);
         allLeads.push(summary);
 
@@ -629,6 +669,7 @@ export async function listAreasWithCounts(
   opts: ListAreasOptions | string = {},
 ): Promise<AreaCountSummary[]> {
   const options: ListAreasOptions = typeof opts === "string" ? { assignedAdminUserId: opts } : opts;
+  if (databaseLeadReadsEnabled()) return queryLeadDatabase<AreaCountSummary[]>("areas", options);
   const index = await getOrBuildLocationIndex();
 
   let candidateLeads = index.allLeads;

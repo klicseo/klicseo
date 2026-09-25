@@ -5,6 +5,8 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
+    // Legacy fixture suites exercise the rollback path; database-read suites opt in.
+    env: { LEAD_DATABASE_READS: 'false' },
   },
   resolve: {
     alias: {
