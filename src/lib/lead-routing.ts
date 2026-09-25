@@ -1,4 +1,6 @@
-import { databaseLeadReadsEnabled, queryLeadDatabase } from "./lead-query";
+import { randomUUID } from "node:crypto";
+import { databaseLeadReadsEnabled, queryLeadDatabase, ensureLeadQueryMetadata } from "./lead-query";
+import { invalidateLeadCaches } from "./leads";
 import { matchesAllocationStatus } from "./lead-routing-shared";
 import { allocationFolderLeadIds } from "./lead-folder-items";
 import "server-only";
@@ -117,13 +119,20 @@ export function matchesFilter(
 
 /**
  * Count unassigned leads, optionally narrowed by status and other filters.
- * Evaluates in memory using the fast location index for near-instant (under 10ms) responses.
+ * Recycling previews use the same database round selector as assignment.
  */
 export async function countMatchingLeads(
   filter: LeadAllocationFilter,
   context: AllocationDestinationContext = {},
-): Promise<{ count: number; totalUnallocated: number; unassignedCount?: number; assignedCount?: number }> {
+): Promise<{ count: number; totalUnallocated: number; unassignedCount?: number; assignedCount?: number; totalMatchingCount?: number; recycleCount?: number | null }> {
   try {
+    if (filter.include_assigned) {
+      const conditions = await allocationDatabaseFilter(filter, context);
+      await ensureLeadQueryMetadata();
+      const { data, error } = await supabase().rpc("preview_recycle_round", { p_filter: conditions });
+      if (error) throw error;
+      return { ...data, totalUnallocated: data.unassignedCount };
+    }
     if (databaseLeadReadsEnabled()) {
       const conditions = await allocationDatabaseFilter(filter, context);
       const [counts, baseline] = await Promise.all([
@@ -131,11 +140,6 @@ export async function countMatchingLeads(
         queryLeadDatabase<{count: number}>("allocationCount", { ...conditions, include_assigned: false, areas: undefined, pincodes: undefined, services: undefined, min_price: undefined }),
       ]);
       return { ...counts, totalUnallocated: baseline.count };
-    }
-    if (filter.include_assigned) {
-      const [{ candidates, membership }, baseline] = await Promise.all([allocationCandidates(filter, context), countMatchingLeads({ ...filter, include_assigned: false })]);
-      const assignedCount = candidates.filter(lead => membership.has(lead.id)).length;
-      return { count: candidates.length, totalUnallocated: baseline.totalUnallocated, assignedCount, unassignedCount: candidates.length - assignedCount };
     }
     const hasExplicitFilters = Boolean(
       (filter.folder && filter.folder !== "all") ||
@@ -396,6 +400,7 @@ export async function executeLeadAllocation(req: AllocationDestinationContext & 
   target_list_id?: string | null;
   notes?: string | null;
   allocation_type?: "manual" | "scheduled" | "daily_recurring" | "queue_replenish";
+  request_id?: string;
 }): Promise<{
   allocatedCount: number;
   reassignedCount?: number;
@@ -413,9 +418,9 @@ export async function executeLeadAllocation(req: AllocationDestinationContext & 
   const destination = await assertAllocationDestination(assignees, req.target_list_id);
   // 1. Fetch location index and assigned lead IDs
   if (req.conditions.include_assigned) {
-    const { candidates, membership } = await allocationCandidates(req.conditions, req, req.lead_count + 250);
-    const { data, error } = await supabase().rpc("allocate_with_recycling", {
-      p_candidates: candidates.map(lead => ({ id: lead.id, status: lead.status ?? "new", list_id: membership.get(lead.id) ?? null })),
+    await ensureLeadQueryMetadata();
+    const { data, error } = await supabase().rpc("allocate_recycle_round", {
+      p_filter: await allocationDatabaseFilter(req.conditions, req),
       p_count: req.lead_count,
       p_assignees: assignees,
       p_target_list: req.target_list_id ?? null,
@@ -423,12 +428,14 @@ export async function executeLeadAllocation(req: AllocationDestinationContext & 
       p_excluded_staff: req.exclude_admin_user_ids ?? assignees,
       p_type: req.allocation_type ?? "manual",
       p_reason: req.notes || "Allocation including already-assigned leads",
+      p_request_id: req.request_id ?? randomUUID(),
     });
     if (error) throw error;
     invalidateAssignedLeadsCache();
-    invalidateLeadListCache();
-    invalidateAreaCountsCache();
-    return { allocatedCount: data.leadIds.length, leadIds: data.leadIds, reassignedCount: data.reassignedCount, unassignedCount: data.leadIds.length - data.reassignedCount };
+    invalidateLeadCaches();
+    return { allocatedCount: data.leadIds.length, leadIds: data.leadIds, reassignedCount: data.reassignedCount, unassignedCount: data.leadIds.length - data.reassignedCount,
+      warnings: data.reassignedCount > 0 && data.roundComplete ? ["This round is complete. The next recycle request can start another round among eligible leads."] : [],
+    };
   }
   const { candidates: candidateLeads } = await allocationCandidates(req.conditions, req, req.lead_count + 250);
 
@@ -526,6 +533,7 @@ export async function createAllocationSchedule(req: NewLeadAllocationRequest): P
       target_list_id: req.target_list_id,
       notes: req.notes,
       allocation_type: "manual",
+      request_id: req.request_id,
     });
 
     const { error: historyError } = await supabase().from("lead_allocation_schedules").insert({
@@ -600,6 +608,7 @@ export async function createAllocationSchedule(req: NewLeadAllocationRequest): P
         assignee_ids: req.assignee_ids,
         target_list_id: req.target_list_id,
         schedule_id: data.id,
+        request_id: req.request_id ?? `${data.id}:${claimedAt}`,
         notes: req.notes || "Initial Auto-Refill batch allocation",
         allocation_type: "queue_replenish",
       });
@@ -876,6 +885,7 @@ export async function processQueueAutoRefills(): Promise<{ refilledStaffCount: n
         const res = await executeLeadAllocation({
           lead_count: rule.lead_count ?? 10,
           schedule_id: rule.id,
+          request_id: `${rule.id}:${claimedAt}`,
           exclude_admin_user_ids: rule.assignee_ids ?? [],
           conditions: rule.conditions ?? {},
           assignee_ids: eligible,
@@ -925,6 +935,7 @@ export async function processScheduledJobs(): Promise<{ executedCount: number }>
         const res = await executeLeadAllocation({
           lead_count: job.lead_count,
           schedule_id: job.id,
+          request_id: `${job.id}:${claimedAt}`,
           conditions: job.conditions ?? {},
           assignee_ids: job.assignee_ids ?? [],
           target_list_id: job.target_list_id,
@@ -973,6 +984,7 @@ export async function processScheduledJobs(): Promise<{ executedCount: number }>
             const res = await executeLeadAllocation({
               lead_count: rule.lead_count ?? 10,
               schedule_id: rule.id,
+              request_id: `${rule.id}:${claimedAt}`,
               exclude_admin_user_ids: rule.assignee_ids ?? [],
               conditions: rule.conditions ?? {},
               assignee_ids: rule.assignee_ids ?? [],
@@ -1004,6 +1016,21 @@ export async function processScheduledJobs(): Promise<{ executedCount: number }>
  * Selectively recycle and reassign non-positive / unbooked leads from a source list or staff member
  * to one or more target telecallers, cleanly moving them and optionally resetting status to "new".
  */
+export async function previewRecycling(req: RecycleLeadsRequest): Promise<{ count: number; totalMatchingCount: number }> {
+  if (!req.source_list_id && !req.source_admin_user_id) throw new Error("Source list or source staff member is required.");
+  if (!req.include_statuses?.length) return { count: 0, totalMatchingCount: 0 };
+  await ensureLeadQueryMetadata();
+  const filter = await allocationDatabaseFilter({ include_assigned: true, statuses: req.include_statuses }, {
+    assignee_ids: req.target_admin_user_ids, target_list_id: req.target_list_id,
+  });
+  const { data, error } = await supabase().rpc("preview_recycle_round", { p_filter: {
+    ...filter, recycle_only: true, source_list_id: req.source_list_id, source_admin_user_id: req.source_admin_user_id,
+    ...(req.specific_lead_ids?.length ? { matchedIds: req.specific_lead_ids } : {}),
+  } });
+  if (error) throw error;
+  return data;
+}
+
 export async function recycleAndReassignLeads(
   req: RecycleLeadsRequest,
 ): Promise<RecycleLeadsResult> {
@@ -1015,118 +1042,34 @@ export async function recycleAndReassignLeads(
   if (req.source_list_id && req.source_list_id === req.target_list_id) throw new Error("Choose a different destination list.");
   await assertAllocationDestination(targetStaffIds, req.target_list_id);
 
-  // 1. Gather all candidate lead items from the source
-  let listItemsQuery = supabase()
-    .from("lead_list_items")
-    .select(`
-      list_id,
-      lead_id,
-      leads:lead_id (id, status, name)
-    `);
-
-  if (req.source_list_id) {
-    listItemsQuery = listItemsQuery.eq("list_id", req.source_list_id);
-  } else if (req.source_admin_user_id) {
-    const { data: sourceLists } = await supabase()
-      .from("lead_lists")
-      .select("id")
-      .eq("assigned_admin_user_id", req.source_admin_user_id);
-    const sourceListIds = (sourceLists ?? []).map((l) => l.id);
-    if (sourceListIds.length === 0) {
-      return { recycledCount: 0, assignedStaffCount: 0, createdListIds: [], protectedCount: 0 };
-    }
-    listItemsQuery = listItemsQuery.in("list_id", sourceListIds);
-  } else {
-    throw new Error("Source list or source staff member is required.");
-  }
-
-  const rawItems = await readAllRows(listItemsQuery.order("lead_id", { ascending: true }));
-
-  const allowedStatuses = new Set(req.include_statuses ?? ["call_not_responded", "contacted", "cancelled", "draft"]);
-  const specificIdsSet = req.specific_lead_ids && req.specific_lead_ids.length > 0
-    ? new Set(req.specific_lead_ids)
-    : null;
-
-  const leadsToRecycle: { leadId: string; sourceListId: string }[] = [];
-  let protectedCount = 0;
-
-  for (const item of rawItems ?? []) {
-    const lead: any = Array.isArray(item.leads) ? item.leads[0] : item.leads;
-    if (!lead) continue;
-
-    const status = lead.status ?? "new";
-    const matchesSpecific = !specificIdsSet || specificIdsSet.has(lead.id);
-
-    if (status !== "booked" && allowedStatuses.has(status) && matchesSpecific) {
-      leadsToRecycle.push({ leadId: lead.id, sourceListId: item.list_id });
-    } else {
-      protectedCount++;
-    }
-  }
-
-  if (leadsToRecycle.length === 0) {
-    return { recycledCount: 0, assignedStaffCount: 0, createdListIds: [], protectedCount };
-  }
-
-  const leadIdsToMove = Array.from(new Set(leadsToRecycle.map((l) => l.leadId)));
-
-  const createdListIds: string[] = [];
-
-  // 4. Assign to target(s)
-  if (req.target_list_id) {
-    await addLeadsToList(req.target_list_id, leadIdsToMove);
-  } else if (targetStaffIds.length > 0) {
-    const perStaff = Math.floor(leadIdsToMove.length / targetStaffIds.length);
-    const remainder = leadIdsToMove.length % targetStaffIds.length;
-    const dateStr = new Date().toLocaleDateString("en-IN");
-
-    for (let i = 0; i < targetStaffIds.length; i++) {
-      const staffId = targetStaffIds[i];
-      const start = i * perStaff + Math.min(i, remainder);
-      const slice = leadIdsToMove.slice(start, start + perStaff + (i < remainder ? 1 : 0));
-      if (slice.length === 0) continue;
-
-      const listName = req.create_new_list_name
-        ? `${req.create_new_list_name}${targetStaffIds.length > 1 ? ` (Part ${i + 1})` : ""}`
-        : `Recycled Leads (${dateStr})`;
-
-      const newList = await insertLeadList({
-        name: listName,
-        assigned_admin_user_id: staffId,
-      });
-
-      await addLeadsToList(newList.id, slice);
-      createdListIds.push(newList.id);
-
-      // Log allocation audit using standard manual allocation_type with recycling reason
-      const logRows = slice.map((leadId) => ({
-        lead_id: leadId,
-        assigned_to_admin_user_id: staffId,
-        assigned_to_list_id: newList.id,
-        allocation_type: "manual" as const,
-        reason: req.reason || "Selective lead recycling / 2nd attempt pitch",
-      }));
-      await supabase().from("lead_allocations_log").insert(logRows);
-    }
-  }
-
-  // Reset only after the moves succeed; a failed destination must not alter source dispositions.
-  if (req.reset_status_to_new) {
-    const { error: updateStatusErr } = await supabase()
-      .from("leads")
-      .update({ status: "new" })
-      .in("id", leadIdsToMove);
-    if (updateStatusErr) throw updateStatusErr;
-  }
-
-  invalidateAreaCountsCache();
-  invalidateLeadListCache();
-
+  if (!req.source_list_id && !req.source_admin_user_id) throw new Error("Source list or source staff member is required.");
+  if (!req.include_statuses?.length) throw new Error("Select at least one lead status to recycle.");
+  await ensureLeadQueryMetadata();
+  const { data, error } = await supabase().rpc("allocate_recycle_round", {
+    p_filter: {
+      allocation: true, include_assigned: true, recycle_only: true,
+      source_list_id: req.source_list_id, source_admin_user_id: req.source_admin_user_id,
+      statuses: req.include_statuses,
+      ...(req.specific_lead_ids?.length ? { matchedIds: req.specific_lead_ids } : {}),
+    },
+    p_count: 2147483647,
+    p_assignees: targetStaffIds, p_target_list: req.target_list_id ?? null,
+    p_schedule: null, p_excluded_staff: targetStaffIds, p_type: "manual",
+    p_reason: req.reason || "Selective lead recycling / 2nd attempt pitch",
+    p_request_id: req.request_id ?? randomUUID(),
+    p_reset_status: req.reset_status_to_new ?? false,
+    p_list_name: req.create_new_list_name || "Recycled Leads",
+  });
+  if (error) throw error;
+  invalidateAssignedLeadsCache();
+  invalidateLeadCaches();
   return {
-    recycledCount: leadIdsToMove.length,
-    assignedStaffCount: targetStaffIds.length || 1,
-    createdListIds,
-    protectedCount,
+    recycledCount: data.reassignedCount,
+    assignedStaffCount: data.assignedStaffCount,
+    createdListIds: data.createdListIds,
+    protectedCount: data.protectedCount,
+    waitingCount: data.waitingCount,
+    roundComplete: data.roundComplete,
   };
 }
 

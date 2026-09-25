@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useTransition } from "react";
+import { useState, useEffect, useTransition, useRef } from "react";
 import {
   X,
   Zap,
@@ -92,6 +92,8 @@ export default function LeadAllocationModal({
 
   // 1. Lead Count (Instant initial display with 0ms delay)
   const [leadCount, setLeadCount] = useState<number>(20);
+  const requestRef = useRef<{ key: string; id: string } | null>(null);
+  const [totalMatchingCount, setTotalMatchingCount] = useState<number | null>(null);
   const [availableCount, setAvailableCount] = useState<number | null>(initialCount ?? null);
   const [totalUnallocatedPool, setTotalUnallocatedPool] = useState<number | null>(initialCount ?? null);
   const [isCounting, setIsCounting] = useState(false);
@@ -176,6 +178,7 @@ export default function LeadAllocationModal({
         if (res.error) throw new Error(res.error);
         setPoolBreakdown({ assigned: res.assignedCount ?? 0, unassigned: res.unassignedCount ?? res.count });
         setAvailableCount(res.count);
+        setTotalMatchingCount(res.totalMatchingCount ?? res.count);
         setTotalUnallocatedPool(res.totalUnallocated);
       } catch (err) {
         if (!cancelled) {
@@ -302,7 +305,7 @@ export default function LeadAllocationModal({
     setError(null);
 
     startTransition(async () => {
-      const res = await submitLeadAllocationAction({
+      const request = {
         schedule_mode: scheduleMode,
         lead_count: Number(leadCount),
         conditions: {
@@ -320,9 +323,13 @@ export default function LeadAllocationModal({
         recurring_time: recurringTime,
         replenish_threshold: Number(replenishThreshold),
         notes: notes.trim() || null,
-      });
+      };
+      const key = JSON.stringify(request);
+      if (requestRef.current?.key !== key) requestRef.current = { key, id: crypto.randomUUID() };
+      const res = await submitLeadAllocationAction({ ...request, request_id: requestRef.current.id });
 
       if (res.ok) {
+        requestRef.current = null;
         const notifySuccess = (message: string) => onSuccess([message, ...(res.reassignedCount != null ? [`${res.unassignedCount ?? 0} newly assigned; ${res.reassignedCount} reassigned.`] : []), ...(res.warnings ?? [])].join(" "));
         if (res.mode === "daily_recurring") {
           notifySuccess(`Configured everyday schedule: ${leadCount} leads at ${recurringTime} IST`);
@@ -439,7 +446,7 @@ export default function LeadAllocationModal({
 
               <div className="flex items-center gap-2 text-xs bg-white/[0.03] px-3 py-1.5 rounded-xl border border-white/5">
                 <span className="text-white/40">
-                  {includeAssigned ? "Eligible Lead Pool:" : hasActiveFilters ? "Matching Filter Pool:" : "Total Unallocated Pool:"}
+                  {includeAssigned ? "Available This Round:" : hasActiveFilters ? "Matching Filter Pool:" : "Total Unallocated Pool:"}
                 </span>
                 {isCounting ? (
                   <Loader2 size={12} className="animate-spin text-[#C9A84C]" />
@@ -455,6 +462,7 @@ export default function LeadAllocationModal({
                       {availableCount ?? 0} leads
                     </strong>
                     {includeAssigned && poolBreakdown && <span className="text-white/60 text-[11px]">({poolBreakdown.unassigned} unassigned + {poolBreakdown.assigned} already assigned)</span>}
+                    {includeAssigned && totalMatchingCount != null && <span className="text-white/60">of {totalMatchingCount} matching leads</span>}
                     {!includeAssigned && hasActiveFilters && totalUnallocatedPool != null && (
                       <span className="text-white/40 text-[11px]">
                         (out of {totalUnallocatedPool} total unallocated)
@@ -468,7 +476,7 @@ export default function LeadAllocationModal({
             <label className="flex items-start gap-3 rounded-xl border border-purple-400/30 bg-purple-500/10 p-3 text-sm text-white">
               <input type="checkbox" checked={includeAssigned} onChange={(event) => setIncludeAssigned(event.target.checked)} />
               <span>Include already-assigned leads
-                <span className="block text-xs text-white/60 mt-1">Move matching leads from their current assignment. Their status stays unchanged. Leads already with the selected team are excluded. Recurring rules use each lead only once.</span>
+                <span className="block text-xs text-white/60 mt-1">Move matching leads from their current assignment. Their status stays unchanged. Leads already with the selected team are excluded. Least-recycled leads go first. A request never crosses into the next round.</span>
               </span>
             </label>
             <div className="flex items-center gap-3 flex-wrap">

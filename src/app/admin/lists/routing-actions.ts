@@ -17,6 +17,7 @@ import {
   deleteScheduledAllocation,
   transferStaffLeads,
   recycleAndReassignLeads,
+  previewRecycling,
   type NewLeadAllocationRequest,
   type LeadAllocationFilter,
   type AllocationDestinationContext,
@@ -54,7 +55,7 @@ export async function getAllocationFilterOptionsAction(): Promise<{
 export async function previewMatchingLeadsAction(
   filter: LeadAllocationFilter,
   context: AllocationDestinationContext = {},
-): Promise<{ count: number; totalUnallocated: number; assignedCount?: number; unassignedCount?: number; error?: string }> {
+): Promise<{ count: number; totalUnallocated: number; assignedCount?: number; unassignedCount?: number; totalMatchingCount?: number; recycleCount?: number | null; error?: string }> {
   try {
     await requireAdminManager();
     return await countMatchingLeads(filter, context);
@@ -93,7 +94,7 @@ export async function submitLeadAllocationAction(
     }
 
     if (req.conditions.include_assigned) {
-      summary += res.reassignedCount != null ? ` (${res.unassignedCount ?? 0} newly assigned, ${res.reassignedCount} reassigned; status preserved)` : "; includes already-assigned leads, status preserved, once per rule";
+      summary += res.reassignedCount != null ? ` (${res.unassignedCount ?? 0} newly assigned, ${res.reassignedCount} reassigned; status preserved)` : "; includes already-assigned leads, status preserved, rotated in rounds";
     }
 
     const warnings = [...(res.warnings ?? [])];
@@ -296,5 +297,14 @@ export async function recycleLeadsAction(
       ok: false,
       error: allocationErrorMessage(err, "Failed to recycle leads."),
     };
+  }
+}
+
+export async function previewRecyclingAction(req: RecycleLeadsRequest): Promise<{ count: number; totalMatchingCount: number; error?: string }> {
+  try {
+    await requireAdminManager();
+    return await previewRecycling(req);
+  } catch (error) {
+    return { count: 0, totalMatchingCount: 0, error: allocationErrorMessage(error, "Could not load the recycling pool.") };
   }
 }

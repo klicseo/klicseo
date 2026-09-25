@@ -45,6 +45,7 @@ export interface LeadAllocationSchedule {
 }
 
 export interface NewLeadAllocationRequest {
+  request_id?: string;
   schedule_mode: ScheduleMode;
   lead_count: number;
   conditions: LeadAllocationFilter;
@@ -82,6 +83,7 @@ export interface StaffWorkloadSummary {
 }
 
 export interface RecycleLeadsRequest {
+  request_id?: string;
   source_list_id?: string;
   source_admin_user_id?: string;
   target_admin_user_ids: string[];
@@ -94,6 +96,8 @@ export interface RecycleLeadsRequest {
 }
 
 export interface RecycleLeadsResult {
+  waitingCount?: number;
+  roundComplete?: boolean;
   recycledCount: number;
   assignedStaffCount: number;
   createdListIds: string[];

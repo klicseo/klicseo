@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+vi.mock("../lead-query", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lead-query")>(),
+  ensureLeadQueryMetadata: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Mock supabase client and dependencies
 const mockRpc = vi.fn();
 const mockSelect = vi.fn();
@@ -310,17 +315,20 @@ describe("Allocation Automations Full Test Suite", () => {
   it("previews assigned candidates but excludes the destination team", async () => {
     mockLeadListsData = [{ id: "source", assigned_admin_user_id: "staff-1" }, { id: "target", assigned_admin_user_id: "staff-2" }];
     mockLeadListItemsData = [{ lead_id: "lead-1", list_id: "source" }, { lead_id: "lead-2", list_id: "target" }];
+    mockRpc.mockResolvedValueOnce({ data: { count: 3, assignedCount: 1, unassignedCount: 2, totalMatchingCount: 5 }, error: null });
     const result = await countMatchingLeads({ include_assigned: true }, { assignee_ids: ["staff-2"] });
     expect(result).toMatchObject({ count: 3, assignedCount: 1, unassignedCount: 2 });
     await executeLeadAllocation({ lead_count: 3, conditions: { include_assigned: true }, assignee_ids: ["staff-2"] });
-    expect(mockRpc.mock.calls[0][1].p_candidates.map((lead: any) => lead.id)).toEqual(["lead-3", "lead-4", "lead-1"]);
+    expect(mockRpc).toHaveBeenCalledWith("allocate_recycle_round", expect.objectContaining({
+      p_filter: expect.objectContaining({ include_assigned: true, excludedStaff: ["staff-2"] }), p_count: 3, p_request_id: expect.any(String),
+    }));
   });
 
   it.each(["once_now", "once_scheduled", "daily_recurring", "queue_replenish"] as const)("persists recycling for %s and supplies the rule ID on dispatch", async (mode) => {
     const res = await createAllocationSchedule({ schedule_mode: mode, lead_count: 1, conditions: { include_assigned: true }, assignee_ids: ["staff-2"], scheduled_for: "2020-01-01T00:00:00Z", recurring_time: "00:00", recurring_days: [0,1,2,3,4,5,6] });
     expect(mockSchedulesData[0].conditions.include_assigned).toBe(true);
     if (mode === "once_scheduled" || mode === "daily_recurring") await processScheduledJobs();
-    expect(mockRpc).toHaveBeenCalledWith("allocate_with_recycling", expect.objectContaining({ p_schedule: mode === "once_now" ? null : mockSchedulesData[0].id }));
+    expect(mockRpc).toHaveBeenCalledWith("allocate_recycle_round", expect.objectContaining({ p_schedule: mode === "once_now" ? null : mockSchedulesData[0].id }));
     if (mode === "queue_replenish") expect(res.reassignedCount).toBe(1);
   });
 
@@ -629,6 +637,7 @@ describe("Allocation Automations Full Test Suite", () => {
         { list_id: "source-list-1", lead_id: "lead-booked-3", leads: { id: "lead-booked-3", status: "booked" } },
       ];
 
+      mockRpc.mockResolvedValueOnce({ data: { reassignedCount: 2, protectedCount: 1, createdListIds: ["new-list"], assignedStaffCount: 1, roundComplete: true, waitingCount: 4 }, error: null });
       const res = await recycleAndReassignLeads({
         source_list_id: "source-list-1",
         target_admin_user_ids: ["staff-2"],
@@ -636,6 +645,12 @@ describe("Allocation Automations Full Test Suite", () => {
         reset_status_to_new: true,
       });
 
+      expect(mockRpc).toHaveBeenCalledWith("allocate_recycle_round", expect.objectContaining({
+        p_filter: expect.objectContaining({ source_list_id: "source-list-1", recycle_only: true, statuses: ["call_not_responded", "cancelled"] }),
+        p_reset_status: true,
+      }));
+      expect(mockUpdate).not.toHaveBeenCalled();
+      expect(res.waitingCount).toBe(4);
       expect(res.recycledCount).toBe(2);
       expect(res.protectedCount).toBe(1); // booked lead protected
       expect(res.createdListIds.length).toBe(1);

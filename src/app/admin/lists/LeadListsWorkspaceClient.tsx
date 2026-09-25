@@ -395,7 +395,7 @@ export default function LeadListsWorkspaceClient({
                     <div className="flex items-center gap-2 flex-wrap text-xs pt-1 border-t border-white/[0.04]">
                       <span className="text-[10px] text-white/40 uppercase font-bold">Filters:</span>
 
-                      {item.conditions.include_assigned && <span className="text-xs text-purple-300">Includes already-assigned leads · status preserved · once per rule</span>}
+                      {item.conditions.include_assigned && <span className="text-xs text-purple-300">Includes already-assigned leads · status preserved · rotates in rounds</span>}
                       {item.conditions.areas && item.conditions.areas.length > 0 && (
                         <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-500/10 border border-sky-500/20 text-sky-300 text-[11px]">
                           <MapPin size={10} /> {item.conditions.areas.join(", ")}

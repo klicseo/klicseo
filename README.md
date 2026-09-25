@@ -618,11 +618,10 @@ The allocation modal offers **Include already-assigned leads** for immediate,
 scheduled, daily, and auto-refill allocations. It is off by default. When enabled,
 unassigned leads are used first; other matching leads transfer from their old list.
 Statuses (including Booked and custom statuses) and custom folders are preserved.
-Leads already with the target team are excluded. Each recurring rule delivers a
-lead only once, tracked in `lead_allocation_deliveries`.
+Leads already with the target team are excluded. Recycling rotates least-recycled leads first within the eligible filtered pool (migration 0048).
 
-Apply `supabase/migrations/0044_global_allocation_recycling.sql` before deploying
-this feature. The service-role-only RPC commits lists, membership changes, history,
+Apply migrations 0044–0048 before deploying this feature; follow the coordinated
+0048 rollout instructions below. The service-role-only RPC commits lists, membership changes, history,
 and delivery tracking together. It serializes list membership writes for the
 transaction and skips candidates whose status or assignment changed after selection.
 Old schedules without `include_assigned` continue using unassigned leads only.
@@ -691,3 +690,40 @@ when the legacy allocation-type check only accepts `auto`, `drip_release`,
 `sla_escalation`, and `manual_transfer`. It retains those values and adds
 `manual`, `scheduled`, `daily_recurring`, and `queue_replenish`. Both fixes are
 required for recycling on these older installations.
+
+### Recycling rounds (migration 0048)
+
+Both dedicated recycling and allocation with assigned leads use `allocate_recycle_round`.
+The database selects the lowest recycle count among eligible assigned leads, then orders
+by oldest recycling timestamp and lead ID. Unassigned leads retain first priority and
+consume no recycle turn. A request never crosses into a higher-count round to fill its
+quantity. Filters and destination exclusions define eligibility; counts persist across
+filter changes, status changes, ordinary transfers, and list deletion.
+
+Migration 0048 adds per-lead counters, historical recycle events, and request receipts.
+The move, counter increment, event, optional status reset, and receipt commit together.
+The same request ID and payload return the original result. Different payloads using
+that ID fail closed. Scheduled dispatch IDs include the rule and claimed run timestamp;
+a later run can recycle a lead again. `lead_allocation_deliveries` remains compatible
+with unassigned-only rules and is not a lifetime exclusion for recycling.
+
+Known prior recycling is backfilled from the explicit reassignment marker and the two
+standard legacy recycling reasons. Custom legacy reasons and old unlogged moves into
+existing lists cannot be reliably reconstructed and start at zero. First-time allocation
+and ordinary transfers are not inferred to be recycling.
+
+Rollout: pause recycling traffic, apply 0048 after 0044–0047, deploy this application,
+then resume recycling. The migration revokes the old recycling RPC so old application
+instances fail closed rather than bypass rotation. Do not roll back the application alone.
+The migration has been tested locally; applying it to a live environment is a coordinated
+release step. No public/anonymous access is granted to the new RPCs or history tables.
+
+Local regression tests (empty disposable database only):
+
+```sh
+psql -h /tmp -p 55439 -d klicseo_rounds_test -v ON_ERROR_STOP=1 -f supabase/tests/recycling-rounds.sql
+python3 supabase/tests/recycling-rounds-concurrency.py klicseo_rounds_test
+```
+
+These tests cover partial rounds, repeated schedules, receipts, protection rules,
+rollback, first allocation, deletion of lists, concurrent batches, and concurrent retries.

@@ -49,11 +49,12 @@ it("defaults to all statuses and restores that default when filters are cleared"
 });
 
 it("opts into assigned leads and displays the eligible pool breakdown", async () => {
-  preview.mockResolvedValue({ count: 5, totalUnallocated: 2, unassignedCount: 2, assignedCount: 3 });
+  preview.mockResolvedValue({ count: 5, totalUnallocated: 2, unassignedCount: 2, assignedCount: 3, totalMatchingCount: 12 });
   show();
   const toggle = screen.getByRole("checkbox", { name: /Include already-assigned leads/ });
   expect((toggle as HTMLInputElement).checked).toBe(false);
   fireEvent.click(toggle);
   await waitFor(() => expect(preview).toHaveBeenLastCalledWith(expect.objectContaining({ include_assigned: true }), expect.any(Object)));
   expect(await screen.findByText(/2 unassigned \+ 3 already assigned/)).toBeTruthy();
+  expect(screen.getByText("of 12 matching leads")).toBeTruthy();
 });

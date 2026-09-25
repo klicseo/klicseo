@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState, useTransition, useEffect, useRef } from "react";
 import {
   X,
   Zap,
@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import type { LeadStatus } from "@/lib/leads-shared";
 import { LEAD_STATUS_LABEL, LEAD_STATUS_COLOR } from "@/lib/leads-shared";
-import { recycleLeadsAction } from "./routing-actions";
+import { recycleLeadsAction, previewRecyclingAction } from "./routing-actions";
 
 interface Props {
   isOpen: boolean;
@@ -60,7 +60,6 @@ export default function RecycleLeadsModal({
   const [reason, setReason] = useState("2nd attempt pitch / Lead recycling");
   const [error, setError] = useState<string | null>(null);
 
-  if (!isOpen) return null;
 
   // Filter available target staff (exclude source telecaller if applicable, fallback to all if needed)
   const filteredStaff = adminUsers.filter(
@@ -92,6 +91,24 @@ export default function RecycleLeadsModal({
     }
   };
 
+  const requestRef = useRef<{ key: string; id: string } | null>(null);
+  const [preview, setPreview] = useState<{ count: number; totalMatchingCount: number; error?: string } | null>(null);
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    setPreview(null);
+    const timer = setTimeout(async () => {
+      try {
+        const result = await previewRecyclingAction({ source_list_id: sourceListId, source_admin_user_id: sourceAdminUserId,
+          target_admin_user_ids: targetStaffIds, include_statuses: selectedStatuses });
+        if (!cancelled) setPreview(result);
+      } catch {
+        if (!cancelled) setPreview({ count: 0, totalMatchingCount: 0, error: "Could not load the recycling pool." });
+      }
+    }, 250);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [isOpen, sourceListId, sourceAdminUserId, targetStaffIds, selectedStatuses]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedStatuses.length === 0) {
@@ -105,7 +122,7 @@ export default function RecycleLeadsModal({
 
     setError(null);
     startTransition(async () => {
-      const res = await recycleLeadsAction({
+      const request = {
         source_list_id: sourceListId,
         source_admin_user_id: sourceAdminUserId,
         target_admin_user_ids: targetStaffIds,
@@ -113,11 +130,16 @@ export default function RecycleLeadsModal({
         reset_status_to_new: resetStatusToNew,
         create_new_list_name: customListName.trim() || undefined,
         reason,
-      });
+      };
+      const key = JSON.stringify(request);
+      if (requestRef.current?.key !== key) requestRef.current = { key, id: crypto.randomUUID() };
+      const res = await recycleLeadsAction({ ...request, request_id: requestRef.current.id });
 
       if (res.ok && res.result) {
+        requestRef.current = null;
         onSuccess?.(
-          `Successfully recycled ${res.result.recycledCount} leads across ${res.result.assignedStaffCount} telecaller(s)! (Protected ${res.result.protectedCount} Booked & Follow-up leads).`,
+          res.result.recycledCount === 0 ? "No eligible leads are available for this destination and these filters." :
+          `Recycled ${res.result.recycledCount} leads across ${res.result.assignedStaffCount} telecaller(s). ${res.result.waitingCount ?? 0} leads are waiting for a later round. ${res.result.roundComplete ? "This round is complete; the next request can start another round among eligible leads." : ""}`,
         );
         onClose();
       } else {
@@ -126,14 +148,8 @@ export default function RecycleLeadsModal({
     });
   };
 
-  // Compute estimated counts from statusBreakdown if available
-  const estimatedRecycleCount = statusBreakdown
-    ? selectedStatuses.reduce((sum, s) => sum + (statusBreakdown[s] ?? 0), 0)
-    : null;
 
-  const estimatedProtectedCount = statusBreakdown
-    ? (statusBreakdown.booked ?? 0) + (statusBreakdown.follow_up ?? 0)
-    : null;
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
@@ -157,7 +173,7 @@ export default function RecycleLeadsModal({
               <strong className="text-white">
                 {sourceListName || sourceStaffName || "Selected Source"}
               </strong>{" "}
-              to other telecallers for a second attempt.
+              to other telecallers, rotating least-recycled leads first.
             </p>
           </div>
 
@@ -299,22 +315,11 @@ export default function RecycleLeadsModal({
             </div>
           </div>
 
-          {/* Live Summary Preview */}
-          {estimatedRecycleCount != null && (
-            <div className="p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.08] flex items-center justify-between text-xs flex-wrap gap-2">
-              <span className="text-white/70">
-                Selected for Recycling:{" "}
-                <strong className="text-purple-300 text-sm tabular-nums">
-                  {estimatedRecycleCount} leads
-                </strong>
-              </span>
-              {estimatedProtectedCount != null && (
-                <span className="text-emerald-400 font-medium">
-                  🛡️ {estimatedProtectedCount} leads protected (Booked & Follow-ups)
-                </span>
-              )}
-            </div>
-          )}
+          <div className="p-3.5 rounded-2xl bg-white/[0.03] text-xs text-white/70" role="status">
+            {!preview ? "Checking this round…" : preview.error ? preview.error :
+              `${preview.count} leads available this round · ${preview.totalMatchingCount} matching leads`}
+            <p className="mt-2">Least-recycled leads go first. The next round starts on a later request.</p>
+          </div>
 
           {/* Section 2: Target Telecallers */}
           <div className="space-y-3">
