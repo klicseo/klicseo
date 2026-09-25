@@ -675,3 +675,19 @@ in an **empty disposable database only**. It verifies paging, scopes, counts,
 recycling eligibility, metadata invalidation and stale-write protection, then
 prints an execution plan on a 10,000-row synthetic fixture. It is not a production
 latency benchmark.
+
+### Legacy allocation-history compatibility (migrations 0046–0047)
+
+If recycling fails with a missing `schedule_id` column, apply
+`supabase/migrations/0046_allocation_history_schedule_compatibility.sql`.
+Some older databases have `lead_allocations_log.rule_id`; the earlier
+`CREATE TABLE IF NOT EXISTS` migrations do not add `schedule_id` to those tables.
+0046 adds the missing nullable schedule reference and preserves all legacy
+columns/history. It is safe to rerun. A failure inside the recycling transaction
+rolls back both list creation and assignment changes.
+
+Also apply `supabase/migrations/0047_allocation_history_types_compatibility.sql`
+when the legacy allocation-type check only accepts `auto`, `drip_release`,
+`sla_escalation`, and `manual_transfer`. It retains those values and adds
+`manual`, `scheduled`, `daily_recurring`, and `queue_replenish`. Both fixes are
+required for recycling on these older installations.

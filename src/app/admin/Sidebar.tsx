@@ -66,12 +66,16 @@ export default function Sidebar({
   role,
   reminders = [],
   showBell = false,
+  desktopNotifications,
+  mobileNotifications,
 }: {
   groups: NavGroup[];
   email: string;
   role: AdminRole;
   reminders?: CallReminder[];
   showBell?: boolean;
+  desktopNotifications?: React.ReactNode;
+  mobileNotifications?: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
@@ -128,7 +132,7 @@ export default function Sidebar({
           </div>
         </Link>
 
-        {showBell && <NotificationBell items={reminders} align="left" />}
+        {showBell && (desktopNotifications ?? <NotificationBell items={reminders} align="left" />)}
       </div>
 
       {/* Navigation Groups */}
@@ -223,7 +227,7 @@ export default function Sidebar({
           Klicseo<span className="text-[#C9A84C]">.</span>
         </Link>
 
-        {showBell ? <NotificationBell items={reminders} align="right" /> : <div className="w-9" />}
+        {showBell ? (mobileNotifications ?? <NotificationBell items={reminders} align="right" />) : <div className="w-9" />}
       </div>
 
       {/* Mobile Drawer Overlay */}

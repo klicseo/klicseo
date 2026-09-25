@@ -1,3 +1,5 @@
+import { Suspense } from "react";
+import NotificationBell from "./NotificationBell";
 import { redirect } from "next/navigation";
 import { currentAdmin, resolveScope } from "@/lib/admin-auth";
 import { type Permission } from "@/lib/admin-users-shared";
@@ -6,6 +8,10 @@ import { listEmployeeCallReminders } from "@/lib/employees";
 import type { CallReminder } from "@/lib/leads-shared";
 import Sidebar, { type NavGroup } from "./Sidebar";
 import AuthSessionGuard from "./AuthSessionGuard";
+
+async function ReminderBell({ reminders, align }: { reminders: Promise<CallReminder[]>; align: "left" | "right" }) {
+  return <NotificationBell items={await reminders} align={align} />;
+}
 
 export default async function AdminShell({
   children,
@@ -70,17 +76,17 @@ export default async function AdminShell({
   }
 
   const bellPermission: Permission = section === "employees" ? "employees.view" : "leads.view";
-  let reminders: CallReminder[] = [];
-  if (can(bellPermission)) {
-    try {
-      reminders =
-        section === "employees"
-          ? await listEmployeeCallReminders({ assignedAdminUserId })
-          : await listCallReminders({ assignedAdminUserId });
-    } catch {
-      reminders = [];
-    }
-  }
+  // Both responsive bells share one scoped request, outside the page's critical path.
+  const reminders = can(bellPermission)
+    ? (section === "employees"
+      ? listEmployeeCallReminders({ assignedAdminUserId })
+      : listCallReminders({ assignedAdminUserId })).catch(() => [] as CallReminder[])
+    : Promise.resolve([] as CallReminder[]);
+  const notificationSlot = (align: "left" | "right") => (
+    <Suspense fallback={<span className="block h-9 w-9 animate-pulse rounded-xl bg-white/5" role="status" aria-label="Loading notifications" />}>
+      <ReminderBell reminders={reminders} align={align} />
+    </Suspense>
+  );
 
   return (
     <div className="min-h-screen bg-[#050E21] text-white selection:bg-[#C9A84C]/30 selection:text-[#E8CC7A] overflow-x-clip">
@@ -89,7 +95,8 @@ export default async function AdminShell({
         groups={groups}
         email={me.email}
         role={me.role}
-        reminders={reminders}
+        desktopNotifications={notificationSlot("left")}
+        mobileNotifications={notificationSlot("right")}
         showBell={can(bellPermission)}
       />
 

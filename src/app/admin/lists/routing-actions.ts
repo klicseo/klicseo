@@ -1,5 +1,6 @@
 "use server";
 
+import { allocationErrorMessage } from "@/lib/allocation-errors";
 import { databaseLeadReadsEnabled, queryLeadDatabase } from "@/lib/lead-query";
 import { getOrBuildLocationIndex } from "@/lib/area";
 import { getSiteSettings } from "@/lib/site-settings";
@@ -59,7 +60,7 @@ export async function previewMatchingLeadsAction(
     return await countMatchingLeads(filter, context);
   } catch (err) {
     console.error("previewMatchingLeadsAction error:", err);
-    return { count: 0, totalUnallocated: 0, error: err instanceof Error ? err.message : "Could not load the available leads." };
+    return { count: 0, totalUnallocated: 0, error: allocationErrorMessage(err, "Could not load the available leads.") };
   }
 }
 
@@ -122,7 +123,7 @@ export async function submitLeadAllocationAction(
     console.error("submitLeadAllocationAction error:", err);
     return {
       ok: false,
-      error: err instanceof Error ? err.message : "Failed to allocate leads.",
+      error: allocationErrorMessage(err, "Failed to allocate leads."),
     };
   }
 }
@@ -293,7 +294,7 @@ export async function recycleLeadsAction(
     console.error("recycleLeadsAction error:", err);
     return {
       ok: false,
-      error: err instanceof Error ? err.message : "Failed to recycle leads.",
+      error: allocationErrorMessage(err, "Failed to recycle leads."),
     };
   }
 }

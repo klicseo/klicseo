@@ -126,8 +126,10 @@ export async function countMatchingLeads(
   try {
     if (databaseLeadReadsEnabled()) {
       const conditions = await allocationDatabaseFilter(filter, context);
-      const counts = await queryLeadDatabase<{count: number; assignedCount: number; unassignedCount: number}>("allocationCount", conditions);
-      const baseline = await queryLeadDatabase<{count: number}>("allocationCount", { ...conditions, include_assigned: false, areas: undefined, pincodes: undefined, services: undefined, min_price: undefined });
+      const [counts, baseline] = await Promise.all([
+        queryLeadDatabase<{count: number; assignedCount: number; unassignedCount: number}>("allocationCount", conditions),
+        queryLeadDatabase<{count: number}>("allocationCount", { ...conditions, include_assigned: false, areas: undefined, pincodes: undefined, services: undefined, min_price: undefined }),
+      ]);
       return { ...counts, totalUnallocated: baseline.count };
     }
     if (filter.include_assigned) {
@@ -698,40 +700,38 @@ export async function deleteScheduledAllocation(id: string): Promise<void> {
  * List staff members with active workload summary, including assigned lists breakdown, completion rates, and total leads.
  */
 export async function listStaffWorkload(): Promise<StaffWorkloadSummary[]> {
-  const { data: adminUsers, error: usersErr } = await supabase()
-    .from("admin_users")
-    .select("id, email, role, employees:employee_id (name)")
-    .eq("status", "active")
-    .order("email");
-
+  // Fetch independent inputs together; transfer grouped counts, not every membership.
+  const [{ data: adminUsers, error: usersErr }, { data: lists, error: listsErr }] = await Promise.all([
+    supabase().from("admin_users")
+      .select("id, email, role, employees:employee_id (name)")
+      .eq("status", "active").order("email"),
+    supabase().from("lead_lists").select("id, name, assigned_admin_user_id, is_custom_folder"),
+  ]);
   if (usersErr) throw usersErr;
-
-  const { data: lists, error: listsErr } = await supabase()
-    .from("lead_lists")
-    .select("id, name, assigned_admin_user_id");
-
   if (listsErr) throw listsErr;
 
-  const listItems = await readAllRows(supabase()
-    .from("lead_list_items")
-    .select("list_id, lead_id, leads:lead_id (status)")
-    .order("lead_id"));
-
-  // Compute total & completed leads per list
   const statsByListId = new Map<string, { total: number; completed: number }>();
-  for (const item of listItems ?? []) {
-    const listId = item.list_id;
-    const current = statsByListId.get(listId) ?? { total: 0, completed: 0 };
-    current.total += 1;
-
-    const lead: any = Array.isArray(item.leads) ? item.leads[0] : item.leads;
-    const status = lead?.status ?? "new";
-    const isCompleted = isCompletedLeadStatus(status);
-    if (isCompleted) {
-      current.completed += 1;
+  if (databaseLeadReadsEnabled()) {
+    const listIds = (lists ?? []).filter((list) => list.assigned_admin_user_id && !list.is_custom_folder).map((list) => list.id);
+    if (listIds.length) {
+      const stats = await queryLeadDatabase<Array<{ list_id: string; status: string; count: number }>>("listStats", { listIds });
+      for (const stat of stats) {
+        const current = statsByListId.get(stat.list_id) ?? { total: 0, completed: 0 };
+        current.total += stat.count;
+        if (isCompletedLeadStatus(stat.status)) current.completed += stat.count;
+        statsByListId.set(stat.list_id, current);
+      }
     }
-
-    statsByListId.set(listId, current);
+  } else {
+    const listItems = await readAllRows(supabase().from("lead_list_items")
+      .select("list_id, lead_id, leads:lead_id (status)").order("lead_id"));
+    for (const item of listItems ?? []) {
+      const current = statsByListId.get(item.list_id) ?? { total: 0, completed: 0 };
+      current.total += 1;
+      const lead: any = Array.isArray(item.leads) ? item.leads[0] : item.leads;
+      if (isCompletedLeadStatus(lead?.status ?? "new")) current.completed += 1;
+      statsByListId.set(item.list_id, current);
+    }
   }
 
   // Group lists by assigned admin user

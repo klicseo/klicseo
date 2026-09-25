@@ -18,6 +18,39 @@ insert into leads select md5(n::text)::uuid, case when n = 2 then 'booked' when 
 insert into lead_list_items select md5(n::text)::uuid, md5('source')::uuid, now() from generate_series(2,6) n;
 insert into lead_folder_items values(md5('2')::uuid,md5('folder')::uuid);
 insert into lead_allocation_schedules values(md5('rule')::uuid);
+-- Reproduce the live legacy schema: history used rule_id before schedules existed.
+alter table lead_allocations_log rename column schedule_id to rule_id;
+alter table lead_allocations_log drop constraint lead_allocations_log_allocation_type_check;
+alter table lead_allocations_log add constraint lead_allocations_log_allocation_type_check check(allocation_type in ('auto','drip_release','sla_escalation','manual_transfer'));
+do $$
+begin
+  begin
+    perform allocate_with_recycling(
+      jsonb_build_array(jsonb_build_object('id',md5('2')::uuid,'status','booked','list_id',md5('source')::uuid)),
+      1,array[md5('b')::uuid],null,null,'{}','manual','Legacy schema regression');
+    raise exception 'Expected missing schedule_id failure';
+  exception when undefined_column then null;
+  end;
+  assert (select count(*) from lead_lists)=2, 'failed batch rolls back its new list';
+  assert (select list_id from lead_list_items where lead_id=md5('2')::uuid)=md5('source')::uuid, 'failed batch keeps original assignment';
+  assert (select count(*) from lead_allocations_log)=0, 'failed batch leaves no history';
+end $$;
+\ir ../migrations/0046_allocation_history_schedule_compatibility.sql
+-- Applying the compatibility migration again is safe.
+\ir ../migrations/0046_allocation_history_schedule_compatibility.sql
+do $$
+begin
+  begin
+    perform allocate_with_recycling(
+      jsonb_build_array(jsonb_build_object('id',md5('2')::uuid,'status','booked','list_id',md5('source')::uuid)),
+      1,array[md5('b')::uuid],null,null,'{}','manual','Legacy allocation type regression');
+    raise exception 'Expected legacy allocation-type constraint failure';
+  exception when check_violation then null;
+  end;
+  assert (select count(*) from lead_lists)=2, 'constraint failure rolls back list creation';
+  assert (select list_id from lead_list_items where lead_id=md5('2')::uuid)=md5('source')::uuid, 'constraint failure keeps assignment';
+end $$;
+\ir ../migrations/0047_allocation_history_types_compatibility.sql
 do $$
 declare result jsonb; snapshot jsonb; before_lists integer;
 begin
@@ -62,4 +95,11 @@ begin
   exception when raise_exception then assert sqlerrm = 'Choose active team members';
   end;
   assert not has_function_privilege('authenticated', 'allocate_with_recycling(jsonb,integer,uuid[],uuid,uuid,uuid[],text,text)', 'execute'), 'server only';
+end $$;
+
+-- Legacy history values remain accepted, and rerunning the migration preserves them.
+insert into lead_allocations_log(lead_id, allocation_type, reason) values(md5('2')::uuid, 'auto', 'Preserved legacy history');
+\ir ../migrations/0047_allocation_history_types_compatibility.sql
+do $$ begin
+  assert exists(select 1 from lead_allocations_log where allocation_type='auto' and reason='Preserved legacy history');
 end $$;

@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { Zap } from "lucide-react";
-import LeadAllocationModal from "./lists/LeadAllocationModal";
+import dynamic from "next/dynamic";
+const LeadAllocationModal = dynamic(() => import("./lists/LeadAllocationModal"));
 import type { LeadListRow } from "@/lib/leadLists-shared";
 
 interface Props {

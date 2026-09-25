@@ -28,7 +28,8 @@ import type {
   StaffWorkloadSummary,
 } from "@/lib/lead-routing-shared";
 import DeleteLeadListButton from "./DeleteLeadListButton";
-import LeadAllocationModal from "./LeadAllocationModal";
+import dynamic from "next/dynamic";
+const LeadAllocationModal = dynamic(() => import("./LeadAllocationModal"));
 import StaffReallocationModal from "./StaffReallocationModal";
 import RecycleLeadsModal from "./RecycleLeadsModal";
 import StaffDatewiseLeadListsView from "../my-lists/StaffDatewiseLeadListsView";
@@ -652,14 +653,14 @@ export default function LeadListsWorkspaceClient({
       )}
 
       {/* Modals */}
-      <LeadAllocationModal
+      {allocateModalOpen && <LeadAllocationModal
         lists={initialLists}
         adminUsers={adminUsers}
         availableAreas={availableAreas}
         isOpen={allocateModalOpen}
         onClose={() => setAllocateModalOpen(false)}
         onSuccess={handleSuccess}
-      />
+      />}
 
       <StaffReallocationModal
         isOpen={reallocateModalOpen}

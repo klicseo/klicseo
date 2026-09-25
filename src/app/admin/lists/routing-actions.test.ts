@@ -21,3 +21,22 @@ it("reports an allocation failure without writing a success audit entry", async 
   expect(await submitLeadAllocationAction(request)).toEqual({ ok: false, error: "Assignment unavailable" });
   expect(audit).not.toHaveBeenCalled();
 });
+
+it("explains a legacy history schema failure returned as a plain database error", async () => {
+  createSchedule.mockRejectedValue({ code: "42703", message: 'column "schedule_id" of relation "lead_allocations_log" does not exist' });
+  const result = await submitLeadAllocationAction({ ...request, conditions: { include_assigned: true, statuses: ["call_not_responded"] } });
+  expect(result.ok).toBe(false);
+  expect(result.error).toContain("migration 0046");
+  expect(audit).not.toHaveBeenCalled();
+});
+it("preserves a useful plain-object database error message", async () => {
+  createSchedule.mockRejectedValue({ code: "P0001", message: "Choose active team members" });
+  expect(await submitLeadAllocationAction(request)).toEqual({ ok: false, error: "Choose active team members" });
+});
+
+it("explains the legacy allocation-type constraint instead of hiding its error", async () => {
+  createSchedule.mockRejectedValue({ code: "23514", message: 'new row violates check constraint "lead_allocations_log_allocation_type_check"' });
+  const result = await submitLeadAllocationAction(request);
+  expect(result.ok).toBe(false);
+  expect(result.error).toContain("migration 0047");
+});
